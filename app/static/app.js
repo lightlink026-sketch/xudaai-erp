@@ -138,6 +138,7 @@ $('#chat-message').onkeydown = (event) => {
 };
 
 const modelDefaults = {
+  siliconflow: ['https://api.siliconflow.cn/v1', 'Qwen/Qwen2.5-VL-72B-Instruct'],
   deepseek: ['https://api.deepseek.com/v1', 'deepseek-chat'],
   openai: ['https://api.openai.com/v1', 'gpt-4o-mini'],
   ollama: ['http://host.docker.internal:11434/v1', 'qwen2.5:7b'],

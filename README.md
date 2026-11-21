@@ -11,7 +11,7 @@
 - 图片索引：支持 pHash 近重复检索；设置 `IMAGE_SEARCH_MODE=clip` 并以 `ENABLE_CLIP=1` 构建后，使用 OpenCLIP 做语义/视觉相似检索。CLIP 首次使用会下载模型并消耗较多内存和存储，需确认 NAS CPU 架构有可用的 PyTorch wheel。
 - API：`/api/assistant/chat`（文字/图片对话）、`/api/search/text`、`/api/search/image`、`/api/index/sync`、`/api/files/{id}/preview`。
 - 钉钉：使用官方 `dingtalk-stream` SDK 的 Stream 长连接机器人，配置企业内部应用 Client ID/Secret 即可启用；无需暴露公网回调。机器人复用统一检索和模型回答。
-- 模型设置页：可选 DeepSeek、OpenAI、任意 OpenAI 兼容服务或 Ollama，设置 Base URL、模型名和密钥，并测试连接。密钥保存在 `data/settings.json`，页面不回显。
+- 模型设置页：可选硅基流动、DeepSeek、OpenAI、任意 OpenAI 兼容服务或 Ollama，设置 Base URL、模型名和密钥，并测试连接。密钥保存在 `data/settings.json`，页面不回显。
 - 可选媒体处理：启用 `ENABLE_MEDIA_AI` 后，扫描件 PDF/图片可做 OCR，音视频可用 Faster Whisper 转写并按时间点检索。
 
 ## 本地开发

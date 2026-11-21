@@ -339,7 +339,7 @@ def get_model_config():
 def put_model_config(payload: dict[str, Any]):
     current = model_config()
     provider = str(payload.get("provider", current["provider"]))
-    defaults = {"deepseek": ("https://api.deepseek.com/v1", "deepseek-chat"), "openai": ("https://api.openai.com/v1", "gpt-4o-mini"), "ollama": ("http://host.docker.internal:11434/v1", "qwen2.5:7b"), "openai-compatible": (current["base_url"], current["model"])}
+    defaults = {"deepseek": ("https://api.deepseek.com/v1", "deepseek-chat"), "siliconflow": ("https://api.siliconflow.cn/v1", "Qwen/Qwen2.5-VL-72B-Instruct"), "openai": ("https://api.openai.com/v1", "gpt-4o-mini"), "ollama": ("http://host.docker.internal:11434/v1", "qwen2.5:7b"), "openai-compatible": (current["base_url"], current["model"])}
     if provider not in defaults:
         raise HTTPException(400, "Unsupported model provider")
     default_url, default_model = defaults[provider]
