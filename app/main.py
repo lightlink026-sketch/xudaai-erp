@@ -428,6 +428,7 @@ def discover_company_profiles() -> list[dict[str, str]]:
         content = "\n".join(text_parts)[:60000]
         name = folder.name if folder != root else "公司资料"
         name_match = re.search(r"(?:公司名称|企业名称|公司抬头|Company\s+Name|Legal\s+Name)\s*[:：|]?\s*([^\n|]{2,100})", content, re.I)
+        english_name_match = re.search(r"(?im)^\s*([A-Z][A-Za-z0-9&.,' -]{2,70}?(?:Co\.,?\s*Ltd\.?|Limited|Ltd\.?|Inc\.?))", content)
         if name_match:
             candidate_name = name_match.group(1).strip(" ：:|")
             if candidate_name and len(candidate_name) < 100:
@@ -439,10 +440,13 @@ def discover_company_profiles() -> list[dict[str, str]]:
         if not address:
             address_match = re.search(r"(?:[\u4e00-\u9fff]{2,}(?:省|自治区)[^\n]{4,160}|(?:Room|Suite|Unit)\s+[^\n]{10,220})", content, re.I)
             address = address_match.group(0).strip() if address_match else ""
+        english_address_match = re.search(r"(?im)^\s*((?:Room|Suite|Unit)\s+\d{1,8}[^\n]{10,250})", content)
         profiles.append({
             "id": (folder.relative_to(LIBRARY_DIR).as_posix() if folder != root else "公司资料"),
             "name": name,
+            "name_en": english_name_match.group(1).strip() if english_name_match else "",
             "address": address[:500],
+            "address_en": english_address_match.group(1).strip() if english_address_match else "",
             "phone": phone_match.group(1).strip() if phone_match else "",
             "email": email_match.group(0) if email_match else "",
             "sources": "、".join(sources[:5]),
@@ -458,7 +462,7 @@ def quote_companies() -> dict[str, Any]:
 
 @app.put("/api/quotes/defaults")
 async def quote_defaults_put(payload: dict[str, Any]) -> dict[str, Any]:
-    keys = {"company_name", "company_contact", "company_address", "company_phone", "company_email", "company_profile_id", "currency", "incoterm", "payment_terms", "payment_note", "shipping_term", "tax_term", "tax_note", "delivery_time", "bank_details", "template_name"}
+    keys = {"company_name", "company_contact", "company_address", "company_phone", "company_email", "company_profile_id", "language", "currency", "incoterm", "payment_terms", "payment_note", "shipping_term", "tax_term", "tax_note", "delivery_time", "bank_details", "template_name"}
     values = {key: str(payload.get(key, "")).strip()[:1000] for key in keys}
     if values.get("currency") and not re.fullmatch(r"[A-Za-z]{3}", values["currency"]):
         raise HTTPException(422, "默认币种请使用三位代码，例如 USD")
@@ -515,6 +519,8 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
     selected_ids = payload.get("selected_products", [])
     if not isinstance(selected_ids, list):
         selected_ids = []
+    if len(selected_ids) > 20:
+        raise HTTPException(422, "一次最多选择 20 个产品；请分批生成报价单")
     selected_context = []
     selected_groups: dict[str, dict[str, Any]] = {}
     with db() as c:
@@ -527,61 +533,63 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
             if not file_row:
                 continue
             parent = Path(file_row["path"]).parent.as_posix()
-            group = selected_groups.setdefault(parent, {"folder": parent, "images": [], "docs": []})
+            selection_id = str(file_row["id"])
+            group = {"selection_id": selection_id, "folder": parent, "selected_path": file_row["path"], "images": [], "docs": []}
             if file_row["ext"] in IMAGE_TYPES:
                 group["images"].append({"id": file_row["id"], "name": file_row["name"], "path": file_row["path"]})
             else:
                 rows = c.execute("SELECT content,page FROM chunks WHERE file_id=? ORDER BY id LIMIT 12", (file_id,)).fetchall()
                 group["docs"].extend(f"{file_row['path']}（第 {row['page'] or '未标注'} 页）：{row['content'][:1200]}" for row in rows)
-                if parent not in {"", "."}:
-                    prefix = parent.rstrip("/") + "/"
-                    image_exts = tuple(IMAGE_TYPES)
-                    placeholders = ",".join("?" for _ in image_exts)
+            if parent not in {"", "."}:
+                prefix = parent.rstrip("/") + "/"
+                image_exts = tuple(IMAGE_TYPES)
+                image_placeholders = ",".join("?" for _ in image_exts)
+                if not group["images"]:
                     image_row = c.execute(
-                        f"SELECT id,name,path FROM files WHERE status='ready' AND ext IN ({placeholders}) AND substr(path,1,?)=? ORDER BY name LIMIT 1",
+                        f"SELECT id,name,path FROM files WHERE status='ready' AND ext IN ({image_placeholders}) AND substr(path,1,?)=? ORDER BY name LIMIT 1",
                         (*image_exts, len(prefix), prefix),
                     ).fetchone()
                     if image_row:
                         group["images"].append({"id": image_row["id"], "name": image_row["name"], "path": image_row["path"]})
-            # Selecting a product image associates it with the text and spreadsheet files
-            # in that product folder. Group by folder so a photo set becomes one quote line.
-            if file_row["ext"] in IMAGE_TYPES:
-                prefix = "" if parent == "." else parent.rstrip("/") + "/"
-                image_exts = tuple(IMAGE_TYPES)
-                placeholders = ",".join("?" for _ in image_exts)
                 siblings = c.execute(
-                    f"SELECT f.id,f.name,f.path,f.ext FROM files f WHERE f.status='ready' AND f.ext NOT IN ({placeholders}) AND (?='' OR substr(f.path,1,?)=?) ORDER BY CASE WHEN f.ext IN ('.txt','.md','.docx') THEN 0 WHEN f.ext='.xlsx' THEN 1 ELSE 2 END,f.name LIMIT 30",
-                    (*image_exts, prefix, len(prefix), prefix),
+                    f"SELECT f.id,f.name,f.path,f.ext FROM files f WHERE f.status='ready' AND f.ext NOT IN ({image_placeholders}) AND substr(f.path,1,?)=? ORDER BY CASE WHEN f.ext IN ('.txt','.md','.docx') THEN 0 WHEN f.ext='.xlsx' THEN 1 ELSE 2 END,f.name LIMIT 30",
+                    (*image_exts, len(prefix), prefix),
                 ).fetchall()
                 for sibling in siblings:
                     rows = c.execute("SELECT content,page FROM chunks WHERE file_id=? ORDER BY id LIMIT 20", (sibling["id"],)).fetchall()
                     group["docs"].extend(f"{sibling['path']}（第 {row['page'] or '未标注'} 页）：{row['content'][:1400]}" for row in rows)
                 # Supplier price books are often stored at the supplier root rather
                 # than beside each product. Match their indexed rows by the model code.
-                model_codes = list(dict.fromkeys(re.findall(r"\d{3,}", Path(parent).name)))
-                if model_codes and parent not in {"", "."}:
-                    supplier_root = parent.split("/")[0]
-                    root_prefix = supplier_root + "/"
-                    pricebooks = c.execute("SELECT id,path FROM files WHERE status='ready' AND ext='.xlsx' AND substr(path,1,?)=? ORDER BY path LIMIT 20", (len(root_prefix), root_prefix)).fetchall()
-                    for pricebook in pricebooks:
-                        for code in model_codes:
-                            rows = c.execute("SELECT content,page FROM chunks WHERE file_id=? AND content LIKE ? ORDER BY id LIMIT 8", (pricebook["id"], f"%{code}%")).fetchall()
-                            group["docs"].extend(f"{pricebook['path']}（报价表，第 {row['page'] or '未标注'} 页）：{row['content'][:1600]}" for row in rows)
-        for folder, group in selected_groups.items():
+                model_codes = list(dict.fromkeys(re.findall(r"\d{3,}", parent + "/" + file_row["name"])))
+                supplier_root = parent.split("/")[0]
+                root_prefix = supplier_root + "/"
+                pricebooks = c.execute("SELECT id,path FROM files WHERE status='ready' AND ext='.xlsx' AND substr(path,1,?)=? ORDER BY path LIMIT 20", (len(root_prefix), root_prefix)).fetchall()
+                for pricebook in pricebooks:
+                    for code in model_codes:
+                        rows = c.execute("SELECT content,page FROM chunks WHERE file_id=? AND content LIKE ? ORDER BY id LIMIT 8", (pricebook["id"], f"%{code}%")).fetchall()
+                        group["docs"].extend(f"{pricebook['path']}（报价表，第 {row['page'] or '未标注'} 页）：{row['content'][:1600]}" for row in rows)
+            selected_groups[selection_id] = group
+        for selection_id, group in selected_groups.items():
             images = "、".join(dict.fromkeys(item["name"] for item in group["images"])) or "无"
             excerpts = list(dict.fromkeys(group["docs"]))
-            selected_context.append(f"产品目录：{folder}\n已选图片：{images}\n相关商品详情/报价资料：\n" + ("\n".join(excerpts[:32]) or "未找到关联文字资料"))
+            price_lines = [line for line in excerpts if ".xlsx" in line.lower() or "报价表" in line]
+            detail_lines = [line for line in excerpts if line not in price_lines]
+            prioritized = detail_lines[:1] + price_lines[:1] + detail_lines[1:2]
+            block = f"勾选项 ID：{selection_id}\n选择文件：{group['selected_path']}\n产品目录：{group['folder']}\n产品图片：{images}\n关联资料：\n" + ("\n".join(line[:850] for line in prioritized) or "未找到关联文字资料")
+            selected_context.append(block[:1900])
     if not selected_context:
         raise HTTPException(400, "请先勾选检索结果中的产品图片或产品资料")
     doc_type = "PI" if str(payload.get("document_type", "quote")).lower() == "pi" else "报价单"
     requested_currency = str(payload.get("currency", "USD")).upper()
     if requested_currency not in {"USD", "EUR", "CNY", "GBP", "JPY"}:
         requested_currency = "USD"
-    schema = {"items":[{"folder":"", "name":"", "description":"", "colors":"", "size_breakdown":"", "configuration":"", "quantity":"1", "moq":"0", "unit":"pcs", "unit_price":"0", "discount_percent":"0", "source":"需人工核对"}]}
+    document_language = "en" if str(payload.get("language", "zh")).lower() == "en" else "zh"
+    schema = {"items":[{"selection_id":"", "name":"", "description":"", "colors":"", "size_breakdown":"", "configuration":"", "quantity":"1", "moq":"0", "unit":"pairs", "unit_price":"0", "discount_percent":"0", "source":"需人工核对"}]}
     instruction = (
-        f"根据勾选结果中的产品图片目录，自动关联该目录的商品详情和报价表，整理一份{doc_type}产品明细。每个不同产品目录只生成一行；同目录多张图片是同一产品，禁止重复生成。每行 folder 必须原样填入对应的‘产品目录’路径。单据币种为 {requested_currency}；从明确对应的报价表/币种列提取型号、产品名称、描述、颜色、尺码范围、配置、MOQ、单价。禁止把相近款式的价格或尺码套用到当前产品。找不到确切匹配的单价填 0，并在 source 标注‘需核对价格’；不要编造。"
+        f"根据每一个勾选项分别关联对应图片、目录里的商品详情和报价表，整理{doc_type}产品明细。必须针对每个不同的勾选项 ID 恰好输出一行；不能按目录合并，不能漏掉任何 ID。每行 selection_id 必须原样填写对应的‘勾选项 ID’。单据币种为 {requested_currency}；从明确对应的报价表/币种列提取型号、名称、描述、颜色、尺码范围、配置、MOQ、单价。禁止把相近款式的价格或尺码套用到当前产品。找不到确切匹配的单价填 0 并标需核对，不要编造。"
         "颜色、尺码或配置只有资料里明确写出才填。数量采用 MOQ（若未提供则为 1），单位优先按资料取值，否则鞋类用 pairs、其他用 pcs。客户、公司、付款和贸易条款不在这里提取。"
-        f"只返回合法 JSON，不要 Markdown。字段结构：{json.dumps(schema, ensure_ascii=False)}\n\n已勾选的图片和关联产品资料：\n" + "\n\n".join(selected_context)[:40000]
+        + ("所有产品文字字段必须输出英文；型号、SKU、数字和品牌原样保留。" if document_language == "en" else "产品文字字段按资料原文输出。")
+        + f"只返回合法 JSON，不要 Markdown。字段结构：{json.dumps(schema, ensure_ascii=False)}\n\n已勾选的图片和关联产品资料：\n" + "\n\n".join(selected_context)[:40000]
     )
     headers = {"Authorization": f"Bearer {cfg['api_key']}"} if cfg["api_key"] else {}
     try:
@@ -595,36 +603,45 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
         draft = json.loads(cleaned)
         if not isinstance(draft, dict) or not isinstance(draft.get("items"), list):
             raise ValueError("missing required JSON fields")
-        # Keep a stable, inspectable source on each automatically associated product row.
-        folders = list(selected_groups)
-        unique_items = []
-        used_folders: set[str] = set()
+        # Map each result back to exactly one selected result, preserving one row per choice.
+        selection_ids = list(selected_groups)
+        matched_items: dict[str, dict[str, Any]] = {}
         for index, item in enumerate(draft["items"]):
             if isinstance(item, dict):
-                requested_folder = str(item.get("folder", "")).strip()
-                folder = requested_folder if requested_folder in selected_groups else (folders[min(index, len(folders) - 1)] if folders else "已勾选产品资料")
-                if folder in used_folders:
+                requested_id = str(item.get("selection_id", "")).strip()
+                selection_id = requested_id if requested_id in selected_groups else next((candidate for candidate in selection_ids if candidate not in matched_items), "")
+                if not selection_id or selection_id in matched_items:
                     continue
-                used_folders.add(folder)
+                matched_items[selection_id] = item
+        unique_items = []
+        for selection_id in selection_ids:
+            group = selected_groups[selection_id]
+            item = matched_items.get(selection_id) or {
+                "name": Path(group["folder"]).name or Path(group["selected_path"]).stem or ("Unidentified product" if document_language == "en" else "待识别产品"),
+                "description": "", "colors": "", "size_breakdown": "", "configuration": "", "quantity": "1", "moq": "0", "unit": "pairs", "unit_price": "0", "discount_percent": "0",
+                "source": "Product details need review" if document_language == "en" else "未自动识别，请核对",
+            }
+            folder = group["folder"]
+            item.pop("selection_id", None)
+            if not str(item.get("name", "")).strip():
+                item["name"] = Path(folder).name or Path(group["selected_path"]).stem or (f"Product {selection_id}" if document_language == "en" else f"产品 {selection_id}")
+            if selection_id not in matched_items:
+                item["source"] = item["source"] if document_language == "en" else f"{folder} · {item['source']}"
+            else:
                 moq_value = str(item.get("moq") or "0").strip()
                 moq_number = float(moq_value) if re.fullmatch(r"\d+(?:\.\d+)?", moq_value) else 0
                 if not str(item.get("quantity", "")).strip() or (str(item.get("quantity", "1")).strip() == "1" and moq_number > 1):
                     item["quantity"] = item.get("moq") or "1"
                 model_source = str(item.get("source", "")).strip()
-                item["source"] = folder if not model_source or model_source == "需人工核对" else f"{folder} · {model_source}"
-                representative_image = selected_groups[folder]["images"]
-                if representative_image:
-                    item["image_path"] = representative_image[0]["path"]
-                    item["image_file_id"] = representative_image[0]["id"]
-                item.pop("folder", None)
-                unique_items.append(item)
-        for folder in folders:
-            if folder not in used_folders:
-                fallback = {"name": Path(folder).name or "待识别产品", "description": "", "colors": "", "size_breakdown": "", "configuration": "", "quantity": "1", "moq": "0", "unit": "pairs", "unit_price": "0", "discount_percent": "0", "source": f"{folder} · 未自动识别，请核对"}
-                if selected_groups[folder]["images"]:
-                    fallback["image_path"] = selected_groups[folder]["images"][0]["path"]
-                    fallback["image_file_id"] = selected_groups[folder]["images"][0]["id"]
-                unique_items.append(fallback)
+                if document_language == "en":
+                    item["source"] = model_source or "Product data"
+                else:
+                    item["source"] = folder if not model_source or model_source == "需人工核对" else f"{folder} · {model_source}"
+            representative_image = group["images"]
+            if representative_image:
+                item["image_path"] = representative_image[0]["path"]
+                item["image_file_id"] = representative_image[0]["id"]
+            unique_items.append(item)
         draft["items"] = unique_items
         return {"draft": draft}
     except httpx.HTTPStatusError as exc:

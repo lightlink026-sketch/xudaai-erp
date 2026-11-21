@@ -98,6 +98,7 @@ def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
         "destination_port": str(payload.get("destination_port", "")).strip()[:150],
         "insurance_term": str(payload.get("insurance_term", "Buyer")).strip()[:100],
         "document_type": "pi" if str(payload.get("document_type", "quote")).lower() == "pi" else "quote",
+        "language": "en" if str(payload.get("language", "zh")).lower() == "en" else "zh",
         "template_name": str(payload.get("template_name", "")).strip()[:150],
         "incoterm": str(payload.get("incoterm", "")).strip()[:100],
         "payment_terms": str(payload.get("payment_terms", "")).strip()[:500],
@@ -170,7 +171,12 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
     right = ParagraphStyle("QuoteRight", parent=body, alignment=TA_RIGHT)
     story = []
     safe = lambda value: escape(str(value or "")).replace("\n", "<br/>")
-    title_text = "形式发票 / PROFORMA INVOICE" if data.get("document_type") == "pi" else "产品报价单 / QUOTATION"
+    english = data.get("language") == "en"
+    word = lambda zh, en: en if english else zh
+    if english:
+        title_text = "PROFORMA INVOICE" if data.get("document_type") == "pi" else "QUOTATION"
+    else:
+        title_text = "形式发票 / PROFORMA INVOICE" if data.get("document_type") == "pi" else "产品报价单 / QUOTATION"
     def product_photo(item: dict[str, Any], max_width: float = 23*mm, max_height: float = 23*mm):
         relative = str(item.get("image_path", "")).strip()
         if not relative or library_dir is None:
@@ -195,7 +201,7 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
         photo_items = [item for item in data["items"] if item.get("image_path")]
         if not photo_items:
             return []
-        gallery_rows = [[Paragraph("产品图片", body), Paragraph("产品 / 型号", body)]]
+        gallery_rows = [[Paragraph(word("产品图片", "Product Image"), body), Paragraph(word("产品 / 型号", "Product / Model"), body)]]
         for item in photo_items:
             gallery_rows.append([product_photo(item, 30*mm, 25*mm), Paragraph(safe(item["name"]), body)])
         gallery = Table(gallery_rows, colWidths=[36*mm, 142*mm], repeatRows=1, hAlign="LEFT")
@@ -205,7 +211,7 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
             ("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),
             ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
         ]))
-        return [Paragraph("产品图片", body), Spacer(1, 2*mm), gallery, Spacer(1, 5*mm)]
+        return [Paragraph(word("产品图片", "Product Images"), body), Spacer(1, 2*mm), gallery, Spacer(1, 5*mm)]
     def footer(canvas, _doc):
         canvas.saveState()
         canvas.setFont("QuoteCJK", 7)
@@ -258,25 +264,25 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
     if data.get("company_name"):
         story.extend([Paragraph(safe(data["company_name"]), ParagraphStyle("Company", parent=body, fontSize=12, leading=16)), Paragraph(safe(data.get("company_contact", "")), small), Spacer(1, 5*mm)])
     meta = [
-        [Paragraph(f"报价单号：{safe(quote_no)}", body), Paragraph(f"日期：{safe(data['quote_date'])}", right)],
-        [Paragraph(f"客户：{safe(data.get('customer') or '—')}", body), Paragraph(f"有效期至：{safe(data.get('valid_until') or '—')}", right)],
-        [Paragraph(f"客户地址：{safe(data.get('customer_address') or '—')}", body), Paragraph(f"币种：{safe(data['currency'])}", right)],
+        [Paragraph(f"{word('报价单号', 'Quote No.')}: {safe(quote_no)}", body), Paragraph(f"{word('日期', 'Date')}: {safe(data['quote_date'])}", right)],
+        [Paragraph(f"{word('客户', 'Customer')}: {safe(data.get('customer') or '—')}", body), Paragraph(f"{word('有效期至', 'Valid Until')}: {safe(data.get('valid_until') or '—')}", right)],
+        [Paragraph(f"{word('客户地址', 'Customer Address')}: {safe(data.get('customer_address') or '—')}", body), Paragraph(f"{word('币种', 'Currency')}: {safe(data['currency'])}", right)],
     ]
     story.append(Table(meta, colWidths=[105*mm, 73*mm], style=TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("BOTTOMPADDING",(0,0),(-1,-1),5),("LINEBELOW",(0,-1),(-1,-1),0.6,colors.HexColor("#dce4dd"))])))
     story.append(Spacer(1, 6*mm))
-    rows = [[Paragraph("图片", body), Paragraph("产品 / 型号", body), Paragraph("描述", body), Paragraph("数量", body), Paragraph("单价", body), Paragraph("折扣", body), Paragraph("金额", body)]]
+    rows = [[Paragraph(word("图片", "Image"), body), Paragraph(word("产品 / 型号", "Product / Model"), body), Paragraph(word("描述", "Description"), body), Paragraph(word("数量", "Quantity"), body), Paragraph(word("单价", "Unit Price"), body), Paragraph(word("折扣", "Discount"), body), Paragraph(word("金额", "Amount"), body)]]
     for item in data["items"]:
         details = item.get("description") or "—"
         if item.get("source"):
-            details += f"\n价格/资料来源：{item['source']}"
+            details += f"\n{word('价格/资料来源', 'Source')}: {item['source']}"
         if item.get("configuration"):
-            details += f"\n颜色/尺码/配比：{item['configuration']}"
+            details += f"\n{word('颜色/尺码/配比', 'Configuration')}: {item['configuration']}"
         if item.get("colors"):
-            details += f"\n颜色/颜色数量：{item['colors']}"
+            details += f"\n{word('颜色/颜色数量', 'Colors / Color Qty.')}: {item['colors']}"
         if item.get("size_breakdown"):
-            details += f"\n尺码配比：{item['size_breakdown']}"
+            details += f"\n{word('尺码配比', 'Size Breakdown')}: {item['size_breakdown']}"
         if Decimal(item.get("moq", "0")) > 0:
-            details += f"\nMOQ：{item['moq']} {item['unit']}"
+            details += f"\nMOQ: {item['moq']} {item['unit']}"
         rows.append([
             product_photo(item), Paragraph(safe(item["name"]), body), Paragraph(safe(details), small),
             Paragraph(f"{safe(item['quantity'])} {safe(item['unit'])}", body), Paragraph(safe(item["unit_price"]), body),
@@ -291,18 +297,18 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
     ]))
     story.extend([table, Spacer(1, 5*mm)])
     summary = [
-        [Paragraph("商品小计", body), Paragraph(f"{safe(data['currency'])} {safe(data['subtotal'])}", right)],
-        [Paragraph("运费", body), Paragraph(f"{safe(data['currency'])} {safe(data['shipping'])}", right)],
-        [Paragraph("其他费用", body), Paragraph(f"{safe(data['currency'])} {safe(data['other_fees'])}", right)],
-        [Paragraph("税额", body), Paragraph(f"{safe(data['currency'])} {safe(data.get('tax_amount', '0'))}", right)],
-        [Paragraph("总计", ParagraphStyle("TotalLabel", parent=body, fontSize=11)), Paragraph(f"{safe(data['currency'])} {safe(data['total'])}", ParagraphStyle("Total", parent=right, fontSize=12, textColor=colors.HexColor("#17765d")))],
+        [Paragraph(word("商品小计", "Subtotal"), body), Paragraph(f"{safe(data['currency'])} {safe(data['subtotal'])}", right)],
+        [Paragraph(word("运费", "Shipping"), body), Paragraph(f"{safe(data['currency'])} {safe(data['shipping'])}", right)],
+        [Paragraph(word("其他费用", "Other Charges"), body), Paragraph(f"{safe(data['currency'])} {safe(data['other_fees'])}", right)],
+        [Paragraph(word("税额", "Tax"), body), Paragraph(f"{safe(data['currency'])} {safe(data.get('tax_amount', '0'))}", right)],
+        [Paragraph(word("总计", "Total"), ParagraphStyle("TotalLabel", parent=body, fontSize=11)), Paragraph(f"{safe(data['currency'])} {safe(data['total'])}", ParagraphStyle("Total", parent=right, fontSize=12, textColor=colors.HexColor("#17765d")))],
     ]
     story.append(Table(summary, colWidths=[140*mm, 38*mm], hAlign="RIGHT", style=TableStyle([("ALIGN",(1,0),(1,-1),"RIGHT"),("LINEABOVE",(0,4),(-1,4),0.8,colors.HexColor("#9db7a4")),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)])))
-    terms = [("贸易条款", "；".join(x for x in [data.get("incoterm", ""), data.get("origin_port", ""), data.get("destination_port", "")] if x)), ("付款条款", "；".join(x for x in [data.get("payment_terms", ""), data.get("payment_note", "")] if x)), ("运费", f"{data.get('shipping_term','')}；金额 {data.get('currency')} {data.get('shipping','0')}"), ("保险", data.get("insurance_term")), ("税费", "；".join(x for x in [data.get("tax_term", ""), data.get("tax_note", ""), f"金额 {data.get('currency')} {data.get('tax_amount','0')}"] if x)), ("汇率基准", f"{data.get('exchange_rate','')} / {data.get('exchange_date','')}" if data.get("exchange_rate") else ""), ("交付时间", data.get("delivery_time")), ("收款信息", data.get("bank_details")), ("备注", data.get("notes"))]
+    terms = [(word("贸易条款", "Trade Terms"), " / ".join(x for x in [data.get("incoterm", ""), data.get("origin_port", ""), data.get("destination_port", "")] if x)), (word("付款条款", "Payment Terms"), " / ".join(x for x in [data.get("payment_terms", ""), data.get("payment_note", "")] if x)), (word("运费", "Shipping"), f"{data.get('shipping_term','')}; {data.get('currency')} {data.get('shipping','0')}"), (word("保险", "Insurance"), data.get("insurance_term")), (word("税费", "Tax Terms"), " / ".join(x for x in [data.get("tax_term", ""), data.get("tax_note", ""), f"{data.get('currency')} {data.get('tax_amount','0')}"] if x)), (word("汇率基准", "Exchange Rate Basis"), f"{data.get('exchange_rate','')} / {data.get('exchange_date','')}" if data.get("exchange_rate") else ""), (word("交付时间", "Delivery Time"), data.get("delivery_time")), (word("收款信息", "Bank Details"), data.get("bank_details")), (word("备注", "Notes"), data.get("notes"))]
     for label, value in terms:
         if value:
             story.extend([Spacer(1, 4*mm), Paragraph(f"<b>{label}</b>：{safe(value)}", body)])
-    story.extend([Spacer(1, 7*mm), Paragraph("本报价内容以双方最终确认为准。", small)])
+    story.extend([Spacer(1, 7*mm), Paragraph(word("本报价内容以双方最终确认为准。", "This quotation is subject to final confirmation by both parties."), small)])
 
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
 

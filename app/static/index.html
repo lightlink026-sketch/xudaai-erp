@@ -46,7 +46,7 @@
       </dialog>
       <dialog id="quote-dialog" class="model-dialog quote-dialog">
         <div class="model-dialog-head"><div><span class="eyebrow">DOCUMENT BUILDER</span><h2>报价单 / PI</h2></div><button id="close-quote-dialog" type="button" aria-label="关闭">×</button></div>
-        <p class="model-dialog-intro">勾选产品图片后自动带入产品资料；填写公司抬头、地址和电话，再生成报价单或 PI PDF。</p>
+        <p class="model-dialog-intro">每个勾选的产品单独生成一行并带入图片；可选择中文或英文单据。</p>
         <div class="quote-card">
           <div class="quote-form-head"><h3 id="quote-form-title">新建单据</h3><span id="quote-number"></span></div>
           <div id="quote-selected-products" class="quote-selected-products"><span>还没有勾选产品。请先在对话结果中勾选产品图片或资料。</span></div>
@@ -56,6 +56,7 @@
             <div class="quote-step-title">第 1 步：产品与数量配置</div>
             <div class="quote-fields">
               <label>单据类型<select name="document_type"><option value="quote">产品报价单</option><option value="pi">PI 形式发票</option></select></label>
+              <label>单据语言<select name="language"><option value="zh">中文</option><option value="en">English</option></select></label>
               <label>模板<select name="template_name" id="quote-template"><option value="">系统默认模板</option></select></label>
               <label class="template-upload">上传 DOCX 模板<input id="quote-template-upload" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label>
               <label>选择公司资料<select id="quote-company-profile"><option value="">手动填写</option></select></label>
@@ -64,8 +65,8 @@
               <label>公司电话<input name="company_phone" type="tel" placeholder="公司联系电话"></label>
               <label>公司邮箱<input name="company_email" type="email" placeholder="公司邮箱（选填）"></label>
             </div>
-            <p class="template-hint">DOCX 模板可放在 data/templates（或 TEMPLATES_DIR）目录，也可在这里上传。占位符：{{customer}}、{{quote_no}}、{{items}}、{{subtotal}}、{{total}}、{{payment_terms}}、{{bank_details}}。当前会保留模板段落与表格文字，复杂样式和图片不保证原样。</p>
-            <div class="quote-items-head"><h3>自动匹配的产品（数量可调整）</h3><button id="quote-add-item" class="secondary" type="button">＋ 添加产品</button></div>
+            <p class="template-hint">DOCX 模板可放在 data/templates（或 TEMPLATES_DIR）目录，也可在这里上传。占位符：{{customer}}、{{quote_no}}、{{items}}、{{subtotal}}、{{total}}、{{payment_terms}}、{{bank_details}}。英文单据请使用系统默认版式或英文 DOCX 模板；自定义模板正文会保留原文。</p>
+            <div class="quote-items-head"><h3>已选产品（每个勾选项单独一行，可调整数量）</h3><button id="quote-add-item" class="secondary" type="button">＋ 添加产品</button></div>
             <div id="quote-items"></div>
             </section>
             <section class="quote-stage" data-quote-stage="2" hidden>
