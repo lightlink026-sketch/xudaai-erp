@@ -30,7 +30,7 @@ from pptx import Presentation
 from pypdf import PdfReader
 import httpx
 from sqlalchemy import text
-from .quotes import list_quotes, normalize_quote, pdf_response, search_quotes
+from .quotes import list_quotes, logistics_totals, normalize_quote, pdf_response, search_quotes
 from .business import (
     WORKSPACES, audit as business_audit, calculate_commission, compute_freight,
     delete_record as delete_business_record, engine as business_engine,
@@ -1246,10 +1246,17 @@ async def assistant_chat(
         for record in quote_records:
             products = "; ".join(
                 f"{item['name']} × {item['quantity']} {item['unit']} @ {item['unit_price']} = {item['amount']}"
-                f"；颜色={item['colors'] or '未记录'}；尺码={item['size_breakdown'] or '未记录'}；MOQ={item['moq'] or '未记录'}；来源={item['source'] or '未记录'}"
+                f"；颜色={item['colors'] or '未记录'}；尺码={item['size_breakdown'] or '未记录'}；MOQ={item['moq'] or '未记录'}；"
+                f"箱规={item['carton_spec'] or '未记录'}；单箱装量={item['units_per_carton'] or '未记录'}；箱数={item['carton_quantity'] or '按数量计算'}；"
+                f"单箱体积={item['carton_volume'] or '未记录'}；毛重/净重={item['gross_weight'] or '未记录'} / {item['net_weight'] or '未记录'}；来源={item['source'] or '未记录'}"
                 for item in record["items"][:12]
             )
-            business_context.append(f"[已保存{('PI' if record['document_type'] == 'pi' else '报价单')}数据库记录] 单号={record['quote_no']}；记录ID={record['id']}；客户={record['customer']}；状态={record['status']}；日期={record['quote_date']}；币种与总额={record['currency']} {record['total']}；贸易条款={record['incoterm']}；起运港/目的港={record['origin_port']} / {record['destination_port']}；运费条款={record['shipping_term']}，运费={record['currency']} {record['shipping']}；起运地费用={record['origin_charges']}；保险={record['insurance_term']} {record['insurance_amount']}；目的地费用={record['destination_charges']}；关税={record['duties']}；税费={record['tax_term']} {record['tax_amount']}；产品明细={products}")
+            logistics = logistics_totals(record["items"])
+            total_cartons = f"{logistics['cartons']:.0f} 箱" if logistics["cartons"] is not None else f"缺箱数（{logistics['unknown_cartons']} 款）"
+            total_cbm = f"{logistics['volume_cbm']:.3f} m³" if logistics["volume_cbm"] is not None else f"缺体积/箱数（{logistics['unknown_volume']} 款）"
+            total_gross = f"{logistics['gross_weight_kg']:.3f} kg" if logistics["gross_weight_kg"] is not None else f"缺毛重/箱数（{logistics['unknown_gross']} 款）"
+            total_net = f"{logistics['net_weight_kg']:.3f} kg" if logistics["net_weight_kg"] is not None else f"缺净重/箱数（{logistics['unknown_net']} 款）"
+            business_context.append(f"[已保存{('PI' if record['document_type'] == 'pi' else '报价单')}数据库记录] 单号={record['quote_no']}；记录ID={record['id']}；客户={record['customer']}；状态={record['status']}；日期={record['quote_date']}；币种与总额={record['currency']} {record['total']}；贸易条款={record['incoterm']}；起运港/目的港={record['origin_port']} / {record['destination_port']}；运费条款={record['shipping_term']}，运费={record['currency']} {record['shipping']}；起运地费用={record['origin_charges']}；保险={record['insurance_term']} {record['insurance_amount']}；目的地费用={record['destination_charges']}；关税={record['duties']}；税费={record['tax_term']} {record['tax_amount']}；物流汇总（按单据现有字段）=箱数 {total_cartons}，总CBM {total_cbm}，毛重 {total_gross}，净重 {total_net}；产品明细={products}")
     shared_rules = list_team_rules(workspace) + list_team_rules("all")
     rule_context = "\n".join(f"- [{rule['name']} v{rule['version']}] {rule['body']}" for rule in shared_rules)
     sources: list[dict[str, Any]] = []
@@ -1282,7 +1289,7 @@ async def assistant_chat(
         context = "\n\n".join(context_items) or "本地资料库没有找到可引用的文字资料。"
         module_instruction = {
             "product": "你负责产品图片和产品资料查询。优先返回型号、规格、价格和可追溯来源。",
-            "freight": "你负责运费及贸易条款。若上下文匹配到报价/PI记录，必须承认已找到单据，并逐条引用记录里的产品名称、数量、单价和金额；不得说缺少商品明细或数量。然后核对单据是否记有单件重量、每箱装量、外箱尺寸/箱规、毛重/净重；没有列出的字段才标为缺失。EXW且运费为0/Excluded时，明确说明当前单据不含运费，不能称为DDP。只根据适用的已上传货代费率和明确输入计算；缺少计费规则或必要重量/箱规时，不给出运费金额、不猜参数。",
+            "freight": "你负责运费及贸易条款。若上下文匹配到报价/PI记录，必须承认已找到单据，并逐条引用记录里的产品数量、价格和箱规/重量字段；按上下文中系统计算的物流汇总回答，不能把有记录的重量或体积说成缺失。若箱规尺寸单位缺失或尺寸乘积与单箱体积字段不一致，引用两种记录并提示核实，不要静默覆盖。EXW且运费为0/Excluded时，明确说明当前单据不含运费，不能称为DDP。只根据适用的已上传货代费率和明确输入计算；缺少计费规则时不提供运费金额、不猜参数。",
             "quote": "你负责报价。可以指导并整理产品、客户、运费和贸易条款；总金额必须按系统字段和规则计算，资料缺失时标注待确认。",
             "pi": "你负责 PI 形式发票。优先复用已确认报价，不自行修改产品价格、付款和交期条款。",
             "customer": "你负责客户档案查询与维护建议。只把已提供的客户记录当作事实。",
@@ -1354,14 +1361,21 @@ async def assistant_chat(
     if workspace == "freight" and quote_records:
         verified_lines = []
         for record in quote_records[:5]:
+            logistics = logistics_totals(record["items"])
             lines = "; ".join(
-                f"{item['name']} × {item['quantity']} {item['unit']} @ {record['currency']} {item['unit_price']} = {record['currency']} {item['amount']}"
+                f"{item['name']} × {item['quantity']} {item['unit']} @ {record['currency']} {item['unit_price']} = {record['currency']} {item['amount']}；"
+                f"箱规 {item['carton_spec'] or '未记录'}；单箱装量 {item['units_per_carton'] or '未记录'}；单箱体积 {item['carton_volume'] or '未记录'}；"
+                f"毛重/净重 {item['gross_weight'] or '未记录'} / {item['net_weight'] or '未记录'}"
                 for item in record["items"][:20]
             ) or "该单据没有商品行"
+            cartons = f"{logistics['cartons']:.0f} 箱" if logistics["cartons"] is not None else "缺少箱数"
+            cbm = f"{logistics['volume_cbm']:.3f} m³" if logistics["volume_cbm"] is not None else "资料不足"
+            gross = f"{logistics['gross_weight_kg']:.3f} kg" if logistics["gross_weight_kg"] is not None else "资料不足"
+            net = f"{logistics['net_weight_kg']:.3f} kg" if logistics["net_weight_kg"] is not None else "资料不足"
             verified_lines.append(
                 f"{record['quote_no']}：{record['document_type'].upper()}，客户 {record['customer']}，总额 {record['currency']} {record['total']}；"
-                f"条款 {record['incoterm'] or '未记录'}；运费 {record['currency']} {record['shipping']}（{record['shipping_term'] or '未记录'}）。商品行：{lines}。"
-                "该报价记录没有单件重量、每箱装量、外箱长宽高或毛/净重字段，不能由商品数量推算这些值。"
+                f"条款 {record['incoterm'] or '未记录'}；运费 {record['currency']} {record['shipping']}（{record['shipping_term'] or '未记录'}）。"
+                f"按单据当前字段汇总：{cartons}，总CBM {cbm}，毛重 {gross}，净重 {net}。商品行：{lines}。"
             )
         answer_text += "\n\n数据库核对（以系统报价/PI记录为准）：\n" + "\n".join(verified_lines)
 
