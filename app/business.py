@@ -207,7 +207,9 @@ def save_conversation(conversation_id: str, workspace: str, messages: list[dict[
                     "customer": str(record.get("customer", ""))[:200], "currency": str(record.get("currency", ""))[:3],
                     "status": str(record.get("status", ""))[:30], "document_type": "pi" if record.get("document_type") == "pi" else "quote",
                     "total": str(record.get("total", ""))[:40], "quote_date": str(record.get("quote_date", ""))[:30],
-                    "incoterm": str(record.get("incoterm", ""))[:100],
+                    "incoterm": str(record.get("incoterm", ""))[:100], "origin_port": str(record.get("origin_port", ""))[:150],
+                    "destination_port": str(record.get("destination_port", ""))[:150], "shipping": str(record.get("shipping", "0"))[:40],
+                    "shipping_term": str(record.get("shipping_term", ""))[:100],
                     "items": [{"name": str(item.get("name", ""))[:200], "quantity": str(item.get("quantity", ""))[:40], "unit": str(item.get("unit", ""))[:30], "unit_price": str(item.get("unit_price", ""))[:40], "amount": str(item.get("amount", ""))[:40]} for item in items[:50] if isinstance(item, dict)],
                 })
             action = message.get("proposed_action")

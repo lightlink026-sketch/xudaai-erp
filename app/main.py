@@ -1201,13 +1201,14 @@ async def assistant_chat(
         for record in list_business_records(kind, limit=40):
             business_context.append(f"[{kind}] id={record['id']} {record['name']}: {json.dumps(record['data'], ensure_ascii=False, default=str)[:900]}")
     quote_records: list[dict[str, Any]] = []
-    if workspace in {"quote", "pi", "customer", "sales"}:
-        pi_only = {"pi"} if workspace == "pi" else None
+    if workspace in {"quote", "pi", "customer", "sales", "freight"}:
+        searching_quote_number = bool(re.search(r"\bQ\d{8}-[A-F0-9]{8}\b", question, re.I))
+        pi_only = {"pi"} if workspace == "pi" and not searching_quote_number else None
         with db() as c:
             quote_records = search_quotes(c, question, pi_only, limit=10)
         for record in quote_records:
             products = "; ".join(f"{item['name']} × {item['quantity']} {item['unit']} @ {item['unit_price']} = {item['amount']}" for item in record["items"][:12])
-            business_context.append(f"[已保存{('PI' if record['document_type'] == 'pi' else '报价单')}数据库记录] 单号={record['quote_no']}；记录ID={record['id']}；客户={record['customer']}；状态={record['status']}；日期={record['quote_date']}；币种与总额={record['currency']} {record['total']}；贸易条款={record['incoterm']}；产品明细={products}")
+            business_context.append(f"[已保存{('PI' if record['document_type'] == 'pi' else '报价单')}数据库记录] 单号={record['quote_no']}；记录ID={record['id']}；客户={record['customer']}；状态={record['status']}；日期={record['quote_date']}；币种与总额={record['currency']} {record['total']}；贸易条款={record['incoterm']}；起运港/目的港={record['origin_port']} / {record['destination_port']}；运费条款={record['shipping_term']}，运费={record['currency']} {record['shipping']}；起运地费用={record['origin_charges']}；保险={record['insurance_term']} {record['insurance_amount']}；目的地费用={record['destination_charges']}；关税={record['duties']}；税费={record['tax_term']} {record['tax_amount']}；产品明细={products}")
     shared_rules = list_team_rules(workspace) + list_team_rules("all")
     rule_context = "\n".join(f"- [{rule['name']} v{rule['version']}] {rule['body']}" for rule in shared_rules)
     sources: list[dict[str, Any]] = []
@@ -1240,7 +1241,7 @@ async def assistant_chat(
         context = "\n\n".join(context_items) or "本地资料库没有找到可引用的文字资料。"
         module_instruction = {
             "product": "你负责产品图片和产品资料查询。优先返回型号、规格、价格和可追溯来源。",
-            "freight": "你负责运费及贸易条款。只根据已上传费率和明确输入解释或计算；缺少路线、计价单位、箱规、重量或生效日期时指出具体缺项，不要猜运价。",
+            "freight": "你负责运费及贸易条款。可查询报价/PI数据库中的单据号、贸易条款、已录运费和客户；先说明单据当前记录了什么，再判断要实现的运输方式是否已计价。EXW且运费为0/不含时，不得说成DDP或已含运费。只根据已上传费率和明确输入计算；缺少路线、计价单位、箱规、重量、目的地费用/税费或生效日期时指出缺项，不要猜运价。",
             "quote": "你负责报价。可以指导并整理产品、客户、运费和贸易条款；总金额必须按系统字段和规则计算，资料缺失时标注待确认。",
             "pi": "你负责 PI 形式发票。优先复用已确认报价，不自行修改产品价格、付款和交期条款。",
             "customer": "你负责客户档案查询与维护建议。只把已提供的客户记录当作事实。",
@@ -1298,7 +1299,7 @@ async def assistant_chat(
             raise HTTPException(502, "无法连接模型服务或模型未返回有效回答，请检查模型设置。")
     elif quote_records:
         answer_text = "已在系统报价/PI数据库中找到以下记录：\n\n" + "\n\n".join(
-            f"- {item['quote_no']}（{'PI' if item['document_type'] == 'pi' else '报价单'}，{item['status']}）：客户 {item['customer']}；{item['currency']} {item['total']}；日期 {item['quote_date']}。产品：" + "; ".join(f"{product['name']} × {product['quantity']} {product['unit']}" for product in item['items'][:8])
+            f"- {item['quote_no']}（{'PI' if item['document_type'] == 'pi' else '报价单'}，{item['status']}）：客户 {item['customer']}；{item['currency']} {item['total']}；日期 {item['quote_date']}；贸易条款 {item['incoterm']}；运费 {item['currency']} {item['shipping']}（{item['shipping_term']}）。产品：" + "; ".join(f"{product['name']} × {product['quantity']} {product['unit']}" for product in item['items'][:8])
             for item in quote_records
         )
     elif sources:

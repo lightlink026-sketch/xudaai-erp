@@ -201,6 +201,8 @@ def search_quotes(conn: sqlite3.Connection, query: str, document_types: set[str]
     terms = [term for term in re.findall(r"[a-z0-9][a-z0-9._-]{1,}", normalized_query) if term not in stop_words]
     terms.extend(re.findall(r"[\u4e00-\u9fff]{2,}", normalized_query))
     terms = list(dict.fromkeys(terms))
+    identifier_match = re.search(r"\b(?:Q|PI)\d{8}-[A-F0-9]{8}\b", query, re.I)
+    requested_number = identifier_match.group(0).casefold() if identifier_match else ""
     result = []
     for row in rows:
         data = json.loads(row["data"])
@@ -209,13 +211,24 @@ def search_quotes(conn: sqlite3.Connection, query: str, document_types: set[str]
             continue
         items = data.get("items", [])
         searchable = " ".join([str(row["customer"] or ""), str(row["quote_no"]), *(str(item.get("name", "")) for item in items)]).casefold()
-        if terms and not all(term in searchable for term in terms):
+        exact_number = bool(requested_number and str(row["quote_no"]).casefold() == requested_number)
+        customer_mentioned = bool(row["customer"] and str(row["customer"]).casefold() in query.casefold())
+        # A unique document number or an explicitly named customer identifies the record.
+        # Trade route/method words are then filters for the answer, not reasons to hide the document.
+        if requested_number and not exact_number:
+            continue
+        if not requested_number and not customer_mentioned and terms and not all(term in searchable for term in terms):
             continue
         result.append({
             "id": row["id"], "quote_no": row["quote_no"], "customer": row["customer"],
             "currency": row["currency"], "status": row["status"], "document_type": doc_type,
             "total": data.get("total", ""), "quote_date": data.get("quote_date", ""),
             "updated_at": row["updated_at"], "incoterm": data.get("incoterm", ""),
+            "origin_port": data.get("origin_port", ""), "destination_port": data.get("destination_port", ""),
+            "shipping": data.get("shipping", "0"), "shipping_term": data.get("shipping_term", ""),
+            "origin_charges": data.get("origin_charges", "0"), "insurance_amount": data.get("insurance_amount", "0"),
+            "insurance_term": data.get("insurance_term", ""), "destination_charges": data.get("destination_charges", "0"),
+            "duties": data.get("duties", "0"), "tax_amount": data.get("tax_amount", "0"), "tax_term": data.get("tax_term", ""),
             "items": [{"name": item.get("name", ""), "quantity": item.get("quantity", ""),
                        "unit": item.get("unit", ""), "unit_price": item.get("unit_price", ""),
                        "amount": item.get("amount", "")} for item in items[:50]],
