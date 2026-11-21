@@ -9,6 +9,7 @@ import csv
 import io
 import json
 import os
+import re
 import uuid
 import time
 from datetime import date, datetime, timezone
@@ -165,7 +166,41 @@ def save_rule(workspace: str, name: str, body: str, rule_id: str = "", actor: st
 def save_conversation(conversation_id: str, workspace: str, messages: list[dict[str, Any]], actor: str = "") -> dict[str, Any]:
     if workspace not in WORKSPACES:
         raise ValueError("未知的 AI 助手窗口")
-    safe_messages = [{"role": str(m.get("role", ""))[:20], "content": str(m.get("content", ""))[:6000]} for m in messages[-100:] if isinstance(m, dict) and m.get("role") in {"user", "assistant"}]
+    safe_messages = []
+    for message in messages[-100:]:
+        if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
+            continue
+        safe = {"role": str(message["role"]), "content": str(message.get("content", ""))[:6000]}
+        image_preview = str(message.get("image_preview", ""))
+        if len(image_preview) <= 250_000 and re.fullmatch(r"data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}", image_preview):
+            safe["image_preview"] = image_preview
+        if safe["role"] == "assistant":
+            safe["sources"] = []
+            for source in message.get("sources", [])[:12] if isinstance(message.get("sources"), list) else []:
+                if not isinstance(source, dict):
+                    continue
+                try:
+                    file_id = max(0, int(source.get("file_id", 0)))
+                except (TypeError, ValueError):
+                    continue
+                safe["sources"].append({"file_id": file_id, "name": str(source.get("name", ""))[:240], "path": str(source.get("path", ""))[:1000], "ext": str(source.get("ext", ""))[:20], "page": source.get("page"), "snippet": str(source.get("snippet", ""))[:700]})
+            safe["image_matches"] = []
+            for match in message.get("image_matches", [])[:50] if isinstance(message.get("image_matches"), list) else []:
+                if not isinstance(match, dict):
+                    continue
+                try:
+                    file_id = max(0, int(match.get("file_id", 0)))
+                    similarity = max(0.0, min(1.0, float(match.get("similarity", 0))))
+                except (TypeError, ValueError):
+                    continue
+                safe["image_matches"].append({"file_id": file_id, "name": str(match.get("name", ""))[:240], "path": str(match.get("path", ""))[:1000], "similarity": similarity, "preview_url": f"/api/files/{file_id}/preview"})
+            safe["image_method"] = str(message.get("image_method", ""))[:80]
+            safe["model"] = str(message.get("model", ""))[:200]
+            safe["used_ai"] = bool(message.get("used_ai", False))
+            action = message.get("proposed_action")
+            if isinstance(action, dict) and action.get("type") in {"customer.save", "customer.delete", "freight_rate.save", "freight.calculate", "salesperson.save", "salesperson.delete", "order.save", "commission_rule.save", "payroll.calculate", "rule.save", "quote.draft", "pi.draft"} and isinstance(action.get("data"), dict):
+                safe["proposed_action"] = {"type": action["type"], "data": action["data"]}
+        safe_messages.append(safe)
     if not safe_messages:
         raise ValueError("对话内容不能为空")
     conversation_id = conversation_id or uuid.uuid4().hex

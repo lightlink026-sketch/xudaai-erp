@@ -121,7 +121,27 @@ function appendWorkspaceMessage(workspace, content) {
 
 function renderWorkspaceConversation() {
   $('#chat-thread').innerHTML = '';
-  chatHistory.forEach((message) => addMessage(message.role, message.content));
+  chatHistory.forEach((message) => {
+    const bubble = addMessage(message.role, message.content, message.image_preview || '');
+    if (message.role === 'assistant' && (message.sources?.length || message.image_matches?.length || message.proposed_action || message.used_ai)) renderReferences(bubble, message);
+  });
+}
+
+async function makeImagePreview(file) {
+  if (!file) return '';
+  try {
+    const bitmap = await createImageBitmap(file);
+    for (const maxSide of [480, 320, 240]) {
+      const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale)); canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      const preview = canvas.toDataURL('image/jpeg', 0.52);
+      if (preview.length <= 220_000) { bitmap.close(); return preview; }
+    }
+    bitmap.close();
+  } catch (_) { /* Some browser image types cannot be thumbnail-decoded. */ }
+  return '';
 }
 
 async function loadWorkspaceConversations({ switchToken = workspaceSwitchToken, restoreLatest = false } = {}) {
@@ -251,7 +271,8 @@ function addMessage(role, content, imageUrl = '') {
   if (role === 'assistant') {
     bubble.innerHTML = `<div class="assistant-mark">✧</div><div class="message-body"><div class="message-text">${esc(content)}</div></div>`;
   } else {
-    bubble.innerHTML = `<div class="message-body">${imageUrl ? `<img class="user-image" src="${imageUrl}" alt="已发送图片">` : ''}<div class="message-text">${esc(content)}</div></div>`;
+    const safeImageUrl = /^(?:blob:|data:image\/(?:jpeg|png|webp);base64,)/i.test(imageUrl) ? imageUrl : '';
+    bubble.innerHTML = `<div class="message-body">${safeImageUrl ? `<img class="user-image" src="${esc(safeImageUrl)}" alt="已发送图片">` : ''}<div class="message-text">${esc(content)}</div></div>`;
   }
   $('#chat-thread').append(bubble);
   bubble.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -394,24 +415,24 @@ $('#chat-form').onsubmit = async (event) => {
   const userText = message || '请识别这张图片，并查找资料库中的相关产品信息。';
   const requestWorkspace = currentWorkspace;
   const requestConversationId = currentConversationId;
+  const requestState = workspaceStates[requestWorkspace] || { id: requestConversationId, messages: requestWorkspace === currentWorkspace ? chatHistory : [] };
+  const historyForRequest = (requestState.messages || []).slice(-8);
+  const imagePreview = image ? await makeImagePreview(image) : '';
   // Clear the composer as soon as the user sends, even if the model request fails.
   $('#chat-message').value = '';
-  selectedChatImage = null;
-  $('#chat-image').value = '';
-  renderAttachment();
-  addMessage('user', userText, imageUrl);
-  const historyForRequest = chatHistory.slice(-8);
-  chatHistory.push({ role: 'user', content: userText });
-  rememberWorkspaceState();
-  const pending = addMessage('assistant', '正在检索产品资料…');
-  pending.classList.add('pending');
+  if (selectedChatImage === image) { selectedChatImage = null; $('#chat-image').value = ''; renderAttachment(); }
+  const userMessage = { role: 'user', content: userText, ...(imagePreview ? { image_preview: imagePreview } : {}) };
+  const messagesWithUser = [...(requestState.messages || []), userMessage].slice(-12);
+  rememberWorkspaceState(requestWorkspace, requestConversationId, messagesWithUser);
+  let pending = null;
+  if (requestWorkspace === currentWorkspace) { addMessage('user', userText, imageUrl); chatHistory = messagesWithUser; pending = addMessage('assistant', '正在检索产品资料…'); pending.classList.add('pending'); }
   $('#chat-send').disabled = true;
   const form = new FormData();
   form.append('message', message);
-  form.append('history', JSON.stringify(historyForRequest));
+  form.append('history', JSON.stringify(historyForRequest.map(({ role, content }) => ({ role, content }))));
   form.append('model_id', $('#chat-model-select').value || 'local');
-  form.append('workspace', currentWorkspace);
-  form.append('conversation_id', currentConversationId);
+  form.append('workspace', requestWorkspace);
+  form.append('conversation_id', requestConversationId);
   form.append('image_threshold', $('#image-threshold').value || '0.20');
   if (image) form.append('image', image);
 
@@ -419,21 +440,22 @@ $('#chat-form').onsubmit = async (event) => {
     const response = await fetch('/api/assistant/chat', { method: 'POST', body: form });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || '对话请求失败');
-    pending.remove();
+    pending?.remove();
     const answer = data.answer || '没有生成回答。';
-    const state = workspaceStates[requestWorkspace] || { id: requestConversationId, messages: historyForRequest };
-    const messages = [...(state.messages || []), ...(state.messages?.at(-1)?.content === userText ? [] : [{ role: 'user', content: userText }]), { role: 'assistant', content: answer }].slice(-12);
+    const state = workspaceStates[requestWorkspace] || { id: requestConversationId, messages: messagesWithUser };
+    const assistantMessage = { role: 'assistant', content: answer, sources: data.sources || [], image_matches: data.image_matches || [], image_method: data.image_method || '', model: data.model || '', used_ai: Boolean(data.used_ai), proposed_action: data.proposed_action || null };
+    const messages = [...(state.messages || messagesWithUser), assistantMessage].slice(-12);
     if (requestWorkspace === currentWorkspace) {
       const reply = addMessage('assistant', answer);
-      renderReferences(reply, data);
+      renderReferences(reply, assistantMessage);
       chatHistory = messages;
       rememberWorkspaceState(requestWorkspace, requestConversationId, chatHistory);
     } else rememberWorkspaceState(requestWorkspace, requestConversationId, messages);
     await saveSharedConversation(requestWorkspace, requestConversationId, messages);
   } catch (error) {
-    pending.remove();
+    pending?.remove();
     const failure = error.message || '暂时无法回答，请检查模型设置和服务状态。';
-    const state = workspaceStates[requestWorkspace] || { id: requestConversationId, messages: historyForRequest };
+    const state = workspaceStates[requestWorkspace] || { id: requestConversationId, messages: messagesWithUser };
     const messages = [...(state.messages || []), { role: 'assistant', content: failure }].slice(-12);
     if (requestWorkspace === currentWorkspace) { addMessage('assistant', failure); chatHistory = messages; }
     rememberWorkspaceState(requestWorkspace, requestConversationId, messages);
