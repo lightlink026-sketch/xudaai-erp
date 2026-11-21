@@ -123,7 +123,7 @@ function renderWorkspaceConversation() {
   $('#chat-thread').innerHTML = '';
   chatHistory.forEach((message) => {
     const bubble = addMessage(message.role, message.content, message.image_preview || '');
-    if (message.role === 'assistant' && (message.sources?.length || message.image_matches?.length || message.proposed_action || message.used_ai)) renderReferences(bubble, message);
+    if (message.role === 'assistant' && (message.sources?.length || message.image_matches?.length || message.quote_records?.length || message.proposed_action || message.used_ai)) renderReferences(bubble, message);
   });
 }
 
@@ -310,6 +310,11 @@ function renderReferences(bubble, data) {
     section.innerHTML = `<b>相似产品图片 (${images.length})</b><div class="chat-match-grid">${images.map((item) => { quoteCandidates.set(String(item.file_id), item); return `<div class="chat-match-card"><a href="/api/files/${item.file_id}/open" target="_blank"><img src="${item.preview_url}" loading="lazy" alt="${esc(item.name)}"><span>${esc(item.name)}</span><small>相似度 ${Number(item.similarity).toFixed(3)}</small></a><label><input type="checkbox" data-select-quote="${item.file_id}" ${selectedQuoteProducts.has(String(item.file_id)) ? 'checked' : ''}>加入报价</label></div>`; }).join('')}</div>`;
     body.append(section);
   }
+  if (data.quote_records?.length) {
+    const section = document.createElement('div'); section.className = 'reference-list quote-record-references';
+    section.innerHTML = `<b>系统报价 / PI 记录 (${data.quote_records.length})</b>` + data.quote_records.map((item) => `<div class="reference-item"><span>▤</span><span><b>${esc(item.quote_no)} · ${item.document_type === 'pi' ? 'PI' : '报价单'}</b><small>${esc(item.customer)} · ${esc(item.currency)} ${esc(item.total)} · ${item.status === 'issued' ? '已生成' : '草稿'}</small></span><button type="button" class="secondary" data-open-quote-record="${esc(item.id)}">打开记录</button></div>`).join('');
+    body.append(section);
+  }
   if (data.proposed_action) {
     const actionId = crypto.randomUUID(); pendingActions.set(actionId, data.proposed_action);
     const card = document.createElement('div'); card.className = 'assistant-action-card';
@@ -319,6 +324,18 @@ function renderReferences(bubble, data) {
 }
 
 $('#chat-thread').addEventListener('click', async (event) => {
+  const openRecord = event.target.closest('[data-open-quote-record]');
+  if (openRecord) {
+    try {
+      const response = await fetch(`/api/quotes/${encodeURIComponent(openRecord.dataset.openQuoteRecord)}`);
+      const quote = await response.json(); if (!response.ok) throw new Error(quote.detail || '无法打开单据记录');
+      fillQuoteForm(quote.data, quote.id, quote.quote_no); activeQuoteStatus = quote.status;
+      const issued = quote.status === 'issued'; $('#quote-save').disabled = issued; $('#quote-pdf').disabled = issued;
+      $('#quote-state').textContent = issued ? '已生成单据为只读记录。' : '已打开单据草稿。';
+      $('#quote-dialog').showModal();
+    } catch (error) { toast(error.message); }
+    return;
+  }
   const openDraft = event.target.closest('[data-open-quote-draft]');
   if (openDraft) {
     try {
@@ -443,7 +460,7 @@ $('#chat-form').onsubmit = async (event) => {
     pending?.remove();
     const answer = data.answer || '没有生成回答。';
     const state = workspaceStates[requestWorkspace] || { id: requestConversationId, messages: messagesWithUser };
-    const assistantMessage = { role: 'assistant', content: answer, sources: data.sources || [], image_matches: data.image_matches || [], image_method: data.image_method || '', model: data.model || '', used_ai: Boolean(data.used_ai), proposed_action: data.proposed_action || null };
+    const assistantMessage = { role: 'assistant', content: answer, sources: data.sources || [], image_matches: data.image_matches || [], quote_records: data.quote_records || [], image_method: data.image_method || '', model: data.model || '', used_ai: Boolean(data.used_ai), proposed_action: data.proposed_action || null };
     const messages = [...(state.messages || messagesWithUser), assistantMessage].slice(-12);
     if (requestWorkspace === currentWorkspace) {
       const reply = addMessage('assistant', answer);

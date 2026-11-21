@@ -191,6 +191,40 @@ def list_quotes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return result
 
 
+def search_quotes(conn: sqlite3.Connection, query: str, document_types: set[str] | None = None, limit: int = 10) -> list[dict[str, Any]]:
+    """Search saved quote/PI records as structured business data, not library files."""
+    rows = conn.execute("SELECT id,quote_no,customer,currency,status,data,updated_at FROM quotes ORDER BY updated_at DESC LIMIT 500").fetchall()
+    stop_words = {"查询", "查找", "查一下", "查下", "帮我", "看看", "客户", "姓名", "有关", "相关", "记录", "资料", "合同", "发票", "是否", "有没有", "请问", "生成", "查看", "报价", "报价单", "形式发票", "pi", "proforma", "invoice", "quote", "quotation", "the", "for", "of", "and", "is", "any", "about"}
+    normalized_query = query.casefold()
+    for stop in sorted((word for word in stop_words if re.search(r"[\u4e00-\u9fff]", word)), key=len, reverse=True):
+        normalized_query = normalized_query.replace(stop, " ")
+    terms = [term for term in re.findall(r"[a-z0-9][a-z0-9._-]{1,}", normalized_query) if term not in stop_words]
+    terms.extend(re.findall(r"[\u4e00-\u9fff]{2,}", normalized_query))
+    terms = list(dict.fromkeys(terms))
+    result = []
+    for row in rows:
+        data = json.loads(row["data"])
+        doc_type = data.get("document_type", "quote")
+        if document_types and doc_type not in document_types:
+            continue
+        items = data.get("items", [])
+        searchable = " ".join([str(row["customer"] or ""), str(row["quote_no"]), *(str(item.get("name", "")) for item in items)]).casefold()
+        if terms and not all(term in searchable for term in terms):
+            continue
+        result.append({
+            "id": row["id"], "quote_no": row["quote_no"], "customer": row["customer"],
+            "currency": row["currency"], "status": row["status"], "document_type": doc_type,
+            "total": data.get("total", ""), "quote_date": data.get("quote_date", ""),
+            "updated_at": row["updated_at"], "incoterm": data.get("incoterm", ""),
+            "items": [{"name": item.get("name", ""), "quantity": item.get("quantity", ""),
+                       "unit": item.get("unit", ""), "unit_price": item.get("unit_price", ""),
+                       "amount": item.get("amount", "")} for item in items[:50]],
+        })
+        if len(result) >= max(1, min(limit, 30)):
+            break
+    return result
+
+
 def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_path: Path | None = None, library_dir: Path | None = None) -> None:
     try:
         from reportlab.lib import colors

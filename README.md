@@ -73,9 +73,9 @@ DOCX 模板可放在 `data/templates/`，也可从 AI 对话中的报价/PI 单�
 
 顶部的助手窗口按产品、运费与贸易、报价、PI、客户、销售、业绩与薪酬、团队规则分区。每个窗口保存共享聊天记录；AI 可以依据当前模块、已录入业务记录和生效的团队规则回答。会话记录包含文字、压缩后的用户图片预览、命中的图片文件 ID/相似度和资料来源，因此切换窗口或换浏览器后可恢复图片卡片；产品原图继续保存在资料目录，数据库只保存引用信息。支持在聊天里确认后执行客户/销售/运费率/订单/提成规则的增改删、计算运费、生成工资草稿及报价/PI 草稿。运费计算只接受已导入的运费率，不允许 AI 自行估价；工资核算按订单、回款/销售额/毛利口径及有效提成规则生成待复核草稿，并可下载 CSV 明细。上传的客户表和运费表会保留原文件并写入结构化记录，后续仍可用 AI 查询、修订。
 
-本机使用时，结构化业务数据和团队规则写入 `data/business.sqlite3`，文档索引/报价单仍使用 `data/library.sqlite3`。单机先用 SQLite 即可。若需要多用户共享，推荐 NAS 上只运行一个应用实例、所有成员访问同一实例，并启用 Postgres 存放共享的业务记录、规则和对话；原始文件、索引和报价/PI PDF 仍需放在同一个共享持久化数据/资料目录。SQLite 数据目录不应由多个应用副本并发写入。
+本机使用时，结构化业务数据、团队规则、会话和图片预览存于 `data/business.sqlite3`，文档索引及报价/PI 记录存于 `data/library.sqlite3`。NAS 上只运行一个应用实例时，也可继续使用 SQLite：全体成员通过浏览器访问同一服务，数据库放 NAS 持久化的 `data/` 目录，原始图片/文档放资料目录。这是当前最简单的迁移方式。若同时写入的成员增多，或计划运行多个应用副本，再启用 PostgreSQL 存放业务记录、规则和对话；报价/PI 与文档索引仍在共享 `data/` 下的 SQLite。无论选哪种数据库，都不要让多个应用副本并发写同一 SQLite 数据目录。
 
-可选 Postgres Compose 示例（请先修改 `.env` 中的口令并配置 `DATABASE_URL`）：
+PostgreSQL 是可选项，仅在需要更高并发时启用。默认 Compose 会继续使用 NAS 上的 SQLite。若选择 PostgreSQL，请先修改 `.env` 中的口令并配置 `DATABASE_URL`：
 
 ```dotenv
 DATABASE_URL=postgresql+psycopg://xudaai:替换为强密码@postgres:5432/xudaai
@@ -86,7 +86,7 @@ POSTGRES_PASSWORD=替换为同一强密码
 docker compose --profile team up -d --build
 ```
 
-从 Windows 本机切换 NAS 时，先停掉本机服务，将整个 `data/` 和资料目录复制到 NAS 对应挂载目录；再启动 NAS 服务。应用启动后，在 NAS 项目目录把本机业务数据库迁入 Postgres（命令会把 `data/business.sqlite3` 复制到 Postgres，不会删除源文件）：
+从 Windows 本机切换 NAS 时，先停掉本机服务，将整个 `data/` 和资料目录复制到 NAS 对应挂载目录；再启动 NAS 服务。继续使用 SQLite 无需转换数据库。只有选择 PostgreSQL 时，才在 NAS 项目目录运行以下命令，将业务记录迁入 Postgres（不会删除源文件）：
 
 ```powershell
 docker compose --profile team exec -e SOURCE_DATABASE_URL=sqlite:////srv/app/data/business.sqlite3 xudaai-library python scripts/migrate_business_db.py

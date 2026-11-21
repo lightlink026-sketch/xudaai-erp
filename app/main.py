@@ -30,7 +30,7 @@ from pptx import Presentation
 from pypdf import PdfReader
 import httpx
 from sqlalchemy import text
-from .quotes import list_quotes, normalize_quote, pdf_response
+from .quotes import list_quotes, normalize_quote, pdf_response, search_quotes
 from .business import (
     WORKSPACES, audit as business_audit, calculate_commission, compute_freight,
     delete_record as delete_business_record, engine as business_engine,
@@ -1200,6 +1200,14 @@ async def assistant_chat(
     for kind in module_record_kinds.get(workspace, []):
         for record in list_business_records(kind, limit=40):
             business_context.append(f"[{kind}] id={record['id']} {record['name']}: {json.dumps(record['data'], ensure_ascii=False, default=str)[:900]}")
+    quote_records: list[dict[str, Any]] = []
+    if workspace in {"quote", "pi", "customer", "sales"}:
+        pi_only = {"pi"} if workspace == "pi" else None
+        with db() as c:
+            quote_records = search_quotes(c, question, pi_only, limit=10)
+        for record in quote_records:
+            products = "; ".join(f"{item['name']} × {item['quantity']} {item['unit']} @ {item['unit_price']} = {item['amount']}" for item in record["items"][:12])
+            business_context.append(f"[已保存{('PI' if record['document_type'] == 'pi' else '报价单')}数据库记录] 单号={record['quote_no']}；记录ID={record['id']}；客户={record['customer']}；状态={record['status']}；日期={record['quote_date']}；币种与总额={record['currency']} {record['total']}；贸易条款={record['incoterm']}；产品明细={products}")
     shared_rules = list_team_rules(workspace) + list_team_rules("all")
     rule_context = "\n".join(f"- [{rule['name']} v{rule['version']}] {rule['body']}" for rule in shared_rules)
     sources: list[dict[str, Any]] = []
@@ -1240,7 +1248,7 @@ async def assistant_chat(
             "payroll": "你负责业绩和提成核算说明。必须区分回款、销售额和毛利口径；未知数据不能补造，计算结果先作为待复核草稿。",
             "rules": "你负责团队规则整理。把用户提出的规则改动整理成明确、可审核的文字；不得声称规则已经发布，除非用户已在规则维护窗口发布。",
         }.get(workspace, "")
-        prompt = f"当前助手窗口：{WORKSPACES[workspace]}。{module_instruction}\n当前问题：{question or '请识别图片并在产品资料库中查找相关信息。'}\n\n本地资料与业务记录（只能把这些作为事实依据）：\n{context}\n\n请用中文直接回答。对检索不到的参数或价格明确说资料不足，不要猜测；在结尾列出引用文件名或记录类型。可以描述你从图片看到的内容，但要区分视觉观察和资料库确认的信息。"
+        prompt = f"当前助手窗口：{WORKSPACES[workspace]}。{module_instruction}\n当前问题：{question or '请识别图片并在产品资料库中查找相关信息。'}\n\n本地资料与业务记录（只能把这些作为事实依据）：\n{context}\n\n系统已保存的报价/PI数据库记录是业务记录，不是本地文件；若上方出现匹配记录，必须优先据此回答客户、单号、状态、金额和产品明细，并引用单号。没有匹配记录时才说明数据库未找到。对其他检索不到的参数或价格明确说资料不足，不要猜测；在结尾列出引用文件名或记录类型。可以描述你从图片看到的内容，但要区分视觉观察和资料库确认的信息。"
         try:
             history_items = json.loads(history)
         except (json.JSONDecodeError, TypeError):
@@ -1288,6 +1296,11 @@ async def assistant_chat(
             raise HTTPException(502, f"模型服务返回 HTTP {e.response.status_code}，请检查该模型配置。")
         except (httpx.HTTPError, KeyError, IndexError, TypeError):
             raise HTTPException(502, "无法连接模型服务或模型未返回有效回答，请检查模型设置。")
+    elif quote_records:
+        answer_text = "已在系统报价/PI数据库中找到以下记录：\n\n" + "\n\n".join(
+            f"- {item['quote_no']}（{'PI' if item['document_type'] == 'pi' else '报价单'}，{item['status']}）：客户 {item['customer']}；{item['currency']} {item['total']}；日期 {item['quote_date']}。产品：" + "; ".join(f"{product['name']} × {product['quantity']} {product['unit']}" for product in item['items'][:8])
+            for item in quote_records
+        )
     elif sources:
         answer_text = "我在本地资料库找到以下相关内容：\n\n" + "\n\n".join(f"**{x['name']}**\n{x['snippet'][:400]}" for x in sources[:4]) + "\n\n配置支持的 AI 模型后，我可以继续综合这些资料回答问题。"
     elif image_results:
@@ -1295,7 +1308,7 @@ async def assistant_chat(
     else:
         answer_text = "我暂时没有在已索引资料里找到相关内容。可以试试产品型号、文件名里的关键词，或上传产品图片查找相似图片。"
 
-    return {"answer": answer_text, "sources": sources, "image_matches": image_results, "image_method": image_method, "proposed_action": proposed_action, "model": model if configured else None, "used_ai": configured}
+    return {"answer": answer_text, "sources": sources, "image_matches": image_results, "quote_records": quote_records, "image_method": image_method, "proposed_action": proposed_action, "model": model if configured else None, "used_ai": configured}
 
 
 @app.post("/api/assistant/execute")

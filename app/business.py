@@ -197,6 +197,19 @@ def save_conversation(conversation_id: str, workspace: str, messages: list[dict[
             safe["image_method"] = str(message.get("image_method", ""))[:80]
             safe["model"] = str(message.get("model", ""))[:200]
             safe["used_ai"] = bool(message.get("used_ai", False))
+            safe["quote_records"] = []
+            for record in message.get("quote_records", [])[:10] if isinstance(message.get("quote_records"), list) else []:
+                if not isinstance(record, dict):
+                    continue
+                items = record.get("items", []) if isinstance(record.get("items"), list) else []
+                safe["quote_records"].append({
+                    "id": str(record.get("id", ""))[:40], "quote_no": str(record.get("quote_no", ""))[:80],
+                    "customer": str(record.get("customer", ""))[:200], "currency": str(record.get("currency", ""))[:3],
+                    "status": str(record.get("status", ""))[:30], "document_type": "pi" if record.get("document_type") == "pi" else "quote",
+                    "total": str(record.get("total", ""))[:40], "quote_date": str(record.get("quote_date", ""))[:30],
+                    "incoterm": str(record.get("incoterm", ""))[:100],
+                    "items": [{"name": str(item.get("name", ""))[:200], "quantity": str(item.get("quantity", ""))[:40], "unit": str(item.get("unit", ""))[:30], "unit_price": str(item.get("unit_price", ""))[:40], "amount": str(item.get("amount", ""))[:40]} for item in items[:50] if isinstance(item, dict)],
+                })
             action = message.get("proposed_action")
             if isinstance(action, dict) and action.get("type") in {"customer.save", "customer.delete", "freight_rate.save", "freight.calculate", "salesperson.save", "salesperson.delete", "order.save", "commission_rule.save", "payroll.calculate", "rule.save", "quote.draft", "pi.draft"} and isinstance(action.get("data"), dict):
                 safe["proposed_action"] = {"type": action["type"], "data": action["data"]}
