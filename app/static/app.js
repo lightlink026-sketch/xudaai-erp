@@ -192,7 +192,7 @@ $('#workspace-upload').onchange = async (event) => {
     else form.append('folder', ({ product: '产品资料', customer: '客户资料', sales: '销售资料', payroll: '薪酬资料', rules: '团队规则资料', quote: '报价资料', pi: 'PI资料' })[currentWorkspace] || '共享资料');
     const response = await fetch(endpoint, { method: 'POST', body: form });
     const data = await response.json(); if (!response.ok) throw new Error(data.detail || '上传失败');
-    const summary = endpoint.endsWith('/import') ? `已从 ${data.source_file} 导入 ${data.imported} 条运费规则。` : `已上传并索引 ${data.uploaded || 0} 个文件。${data.files?.filter((f) => f.status === 'error').length ? '部分文件解析失败，请查看同步记录。' : ''}`;
+    const summary = endpoint.endsWith('/import') ? `已从 ${data.source_file} 导入 ${data.imported} 条运费规则；货代分类：${(data.carriers || []).join('、') || '按文件名归类'}；工作表：${(data.sheets || []).join('、') || '默认表'}。${data.needs_review ? `${data.needs_review} 条计价方式需要人工确认。` : '识别到的计价规则已分类，可在对话中按货代分别计算或对比。'}` : `已上传并索引 ${data.uploaded || 0} 个文件。${data.files?.filter((f) => f.status === 'error').length ? '部分文件解析失败，请查看同步记录。' : ''}`;
     reply.querySelector('.message-text').textContent = summary;
     if (uploadWorkspace === currentWorkspace) await loadStatus();
     await appendWorkspaceMessage(uploadWorkspace, summary);
@@ -368,6 +368,9 @@ $('#chat-thread').addEventListener('click', async (event) => {
     if (result.calculation?.freight_total != null) {
       const calc = result.calculation;
       summary = `运费计算完成：${calc.currency} ${Number(calc.freight_total).toFixed(2)}。计费单位 ${calc.rate_unit}，计价数量 ${calc.basis_quantity}；体积重 ${calc.volumetric_weight_kg} kg，计费重 ${calc.chargeable_weight_kg} kg。卖方承担费用类别：${calc.seller_cost_components.join('、') || '无（EXW）'}。`;
+    }
+    if (result.comparisons) {
+      summary = `货代报价分别计算完成（${result.comparisons.filter((x) => x.calculation).length} 条有效方案）：\n` + result.comparisons.map((row, index) => row.calculation ? `${index + 1}. ${row.carrier || row.name}${row.channel ? ` / ${row.channel}` : ''}：${row.calculation.currency} ${Number(row.calculation.freight_total).toFixed(2)}；公式：${row.formula_summary || `${row.calculation.rate_unit} × ${row.calculation.rate}`}；计费量 ${row.calculation.basis_quantity} ${row.calculation.rate_unit}` : `无法计算 ${row.carrier || row.name || row.rate_id}：${row.error}`).join('\n');
     }
     if (result.calculation?.commission_total != null) {
       const calc = result.calculation;

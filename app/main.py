@@ -629,7 +629,10 @@ async def freight_import(file: UploadFile = File(...), x_actor: str = Header(def
         raise HTTPException(422, str(exc)) from exc
     if not rates:
         raise HTTPException(422, "没有识别到运费行。表格需包含运价、计价单位等列；原文件仍可上传到资料库后让 AI 检索。")
-    return {"imported": len(rates), "rates": rates, "source_file": relative_path, "file_status": index_result["status"]}
+    return {"imported": len(rates), "rates": rates, "source_file": relative_path, "file_status": index_result["status"],
+            "carriers": sorted({str(row["data"].get("carrier", "")) for row in rates if row["data"].get("carrier")}),
+            "sheets": sorted({str(row["data"].get("source_sheet", "")) for row in rates if row["data"].get("source_sheet")}),
+            "needs_review": sum(row["data"].get("classification_status") == "needs_review" for row in rates)}
 
 
 @app.post("/api/business/customers/import")
@@ -665,6 +668,32 @@ def freight_calculate(payload: dict[str, Any]) -> dict[str, Any]:
         return {"calculation": calculation}
     except (ValueError, TypeError) as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/business/freight/compare")
+def freight_compare(payload: dict[str, Any]) -> dict[str, Any]:
+    rate_ids = payload.get("rate_ids")
+    if not isinstance(rate_ids, list) or not rate_ids:
+        raise HTTPException(422, "请指定需要分别计算的 rate_ids")
+    if len(rate_ids) > 100:
+        raise HTTPException(422, "一次最多比较 100 条货代费率")
+    results = []
+    for rate_id in rate_ids:
+        record = get_business_record(str(rate_id))
+        if not record or record["kind"] != "freight_rate":
+            results.append({"rate_id": str(rate_id), "error": "费率记录不存在"})
+            continue
+        try:
+            calculation = compute_freight(payload, record["data"])
+            results.append({"rate_id": record["id"], "name": record["name"], "carrier": record["data"].get("carrier", ""),
+                            "channel": record["data"].get("channel", ""), "source_file": record["data"].get("source_file", ""),
+                            "source_sheet": record["data"].get("source_sheet", ""), "formula_summary": record["data"].get("formula_summary", ""),
+                            "calculation": calculation})
+        except (ValueError, TypeError) as exc:
+            results.append({"rate_id": record["id"], "name": record["name"], "carrier": record["data"].get("carrier", ""), "error": str(exc)})
+    comparable = [row for row in results if row.get("calculation")]
+    comparable.sort(key=lambda row: row["calculation"]["freight_total"])
+    return {"results": comparable + [row for row in results if row.get("error")], "compared": len(comparable)}
 
 
 @app.post("/api/business/payroll/calculate")
@@ -1289,7 +1318,7 @@ async def assistant_chat(
         context = "\n\n".join(context_items) or "本地资料库没有找到可引用的文字资料。"
         module_instruction = {
             "product": "你负责产品图片和产品资料查询。优先返回型号、规格、价格和可追溯来源。",
-            "freight": "你负责运费及贸易条款。若上下文匹配到报价/PI记录，必须承认已找到单据，并逐条引用记录里的产品数量、价格和箱规/重量字段；按上下文中系统计算的物流汇总回答，不能把有记录的重量或体积说成缺失。若箱规尺寸单位缺失或尺寸乘积与单箱体积字段不一致，引用两种记录并提示核实，不要静默覆盖。EXW且运费为0/Excluded时，明确说明当前单据不含运费，不能称为DDP。只根据适用的已上传货代费率和明确输入计算；缺少计费规则时不提供运费金额、不猜参数。",
+            "freight": "你负责运费及贸易条款。若上下文匹配到报价/PI记录，必须承认已找到单据，并逐条引用记录里的产品数量、价格和箱规/重量字段；按上下文中系统计算的物流汇总回答，不能把有记录的重量或体积说成缺失。若箱规尺寸单位缺失或尺寸乘积与单箱体积字段不一致，引用两种记录并提示核实，不要静默覆盖。EXW且运费为0/Excluded时，明确说明当前单据不含运费，不能称为DDP。只根据适用的已上传货代费率和明确输入计算；缺少计费规则时不提供运费金额、不猜参数。多个货代方案要分别列出货代、渠道、计价公式和来源；若用户要求对比，动作使用 freight.compare，rate_ids 填入上下文中匹配路线的所有已保存费率记录ID，并共享明确的箱数/CBM/毛重/贸易条款输入。",
             "quote": "你负责报价。可以指导并整理产品、客户、运费和贸易条款；总金额必须按系统字段和规则计算，资料缺失时标注待确认。",
             "pi": "你负责 PI 形式发票。优先复用已确认报价，不自行修改产品价格、付款和交期条款。",
             "customer": "你负责客户档案查询与维护建议。只把已提供的客户记录当作事实。",
@@ -1303,7 +1332,7 @@ async def assistant_chat(
         except (json.JSONDecodeError, TypeError):
             history_items = []
         system_instruction = "你是团队业务 AI 助手。回答优先依据检索到的团队资料和已发布规则；不要编造型号、参数、价格、库存、运费、回款或合同条款。资料不足时明确说缺少什么。图片只能支持外观观察和相似图检索。"
-        system_instruction += '\n当用户明确要求新增、修改、删除客户/销售/运费率/订单/提成规则、计算运费、生成工资草稿或生成报价/PI 草稿，且必填数据充分时，在回答末尾另附一个动作块：[[ACTION_JSON]]{"type":"customer.save","data":{...}}[[/ACTION_JSON]]。动作类型只允许 customer.save/customer.delete/freight_rate.save/freight.calculate/salesperson.save/salesperson.delete/order.save/commission_rule.save/payroll.calculate/rule.save/quote.draft/pi.draft。报价/PI 的产品名称、数量、币种与价格必须来自当前资料库引用或用户明确输入；缺少价格、客户或数量时先简短追问，不输出动作块。运费动作必须使用系统已导入的 rate_id，不能猜测价格。删除动作必须有已存在的 id。动作只在用户点击确认后执行，并且生成的是可编辑草稿。'
+        system_instruction += '\n当用户明确要求新增、修改、删除客户/销售/运费率/订单/提成规则、计算或对比运费、生成工资草稿或生成报价/PI 草稿，且必填数据充分时，在回答末尾另附一个动作块：[[ACTION_JSON]]{"type":"customer.save","data":{...}}[[/ACTION_JSON]]。动作类型只允许 customer.save/customer.delete/freight_rate.save/freight.calculate/freight.compare/salesperson.save/salesperson.delete/order.save/commission_rule.save/payroll.calculate/rule.save/quote.draft/pi.draft。报价/PI 的产品名称、数量、币种与价格必须来自当前资料库引用或用户明确输入；缺少价格、客户或数量时先简短追问，不输出动作块。运费动作必须使用系统已导入的 rate_id，不能猜测价格。对比动作 data 必须包含 rate_ids 数组和明确的计费数据。删除动作必须有已存在的 id。动作只在用户点击确认后执行，并且生成的是可编辑草稿。'
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_instruction}]
         if isinstance(history_items, list):
             for item in history_items[-8:]:
@@ -1331,7 +1360,7 @@ async def assistant_chat(
                 if action_match:
                     try:
                         candidate = json.loads(action_match.group(1))
-                        allowed_actions = {"customer.save", "customer.delete", "freight_rate.save", "freight.calculate", "salesperson.save", "salesperson.delete", "order.save", "commission_rule.save", "payroll.calculate", "rule.save", "quote.draft", "pi.draft"}
+                        allowed_actions = {"customer.save", "customer.delete", "freight_rate.save", "freight.calculate", "freight.compare", "salesperson.save", "salesperson.delete", "order.save", "commission_rule.save", "payroll.calculate", "rule.save", "quote.draft", "pi.draft"}
                         if isinstance(candidate, dict) and candidate.get("type") in allowed_actions and isinstance(candidate.get("data"), dict):
                             proposed_action = {"type": candidate["type"], "data": candidate["data"]}
                             answer_text = (answer_text[:action_match.start()] + answer_text[action_match.end():]).strip()
@@ -1391,7 +1420,7 @@ def assistant_execute(payload: dict[str, Any], x_actor: str = Header(default="")
         raise HTTPException(422, "AI 动作数据格式无效")
     allowed_by_workspace = {
         "customer": {"customer.save", "customer.delete"},
-        "freight": {"freight_rate.save", "freight.calculate"},
+        "freight": {"freight_rate.save", "freight.calculate", "freight.compare"},
         "sales": {"salesperson.save", "salesperson.delete", "order.save"},
         "payroll": {"commission_rule.save", "payroll.calculate"},
         "rules": {"rule.save"},
@@ -1444,6 +1473,22 @@ def assistant_execute(payload: dict[str, Any], x_actor: str = Header(default="")
             if not rate_record or rate_record["kind"] != "freight_rate":
                 raise HTTPException(404, "运费率记录不存在")
             return {"result": {"calculation": compute_freight(data, rate_record["data"] if rate_record else None)}}
+        if action == "freight.compare":
+            rate_ids = data.get("rate_ids")
+            if not isinstance(rate_ids, list) or not rate_ids:
+                raise HTTPException(422, "对比货代费率需要提供 rate_ids")
+            results = []
+            for rate_id in rate_ids[:100]:
+                record = get_business_record(str(rate_id))
+                if not record or record["kind"] != "freight_rate":
+                    results.append({"rate_id": str(rate_id), "error": "费率记录不存在"})
+                    continue
+                try:
+                    results.append({"rate_id": record["id"], "name": record["name"], "carrier": record["data"].get("carrier", ""), "channel": record["data"].get("channel", ""), "formula_summary": record["data"].get("formula_summary", ""), "calculation": compute_freight(data, record["data"])})
+                except (ValueError, TypeError) as exc:
+                    results.append({"rate_id": record["id"], "name": record["name"], "carrier": record["data"].get("carrier", ""), "error": str(exc)})
+            results.sort(key=lambda row: row.get("calculation", {}).get("freight_total", float("inf")))
+            return {"result": {"comparisons": results}}
         if action == "payroll.calculate":
             result = calculate_commission(str(data.get("seller_id", "")), str(data.get("start_date", "")), str(data.get("end_date", "")))
             result["name"] = f"{result['seller_name']} {result['period_start']} 至 {result['period_end']} 工资草稿"

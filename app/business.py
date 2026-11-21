@@ -213,7 +213,7 @@ def save_conversation(conversation_id: str, workspace: str, messages: list[dict[
                     "items": [{"name": str(item.get("name", ""))[:200], "description": str(item.get("description", ""))[:500], "configuration": str(item.get("configuration", ""))[:500], "colors": str(item.get("colors", ""))[:300], "size_breakdown": str(item.get("size_breakdown", ""))[:300], "carton_spec": str(item.get("carton_spec", ""))[:200], "units_per_carton": str(item.get("units_per_carton", ""))[:40], "carton_quantity": str(item.get("carton_quantity", ""))[:40], "carton_volume": str(item.get("carton_volume", ""))[:100], "gross_weight": str(item.get("gross_weight", ""))[:100], "net_weight": str(item.get("net_weight", ""))[:100], "moq": str(item.get("moq", ""))[:40], "quantity": str(item.get("quantity", ""))[:40], "unit": str(item.get("unit", ""))[:30], "unit_price": str(item.get("unit_price", ""))[:40], "amount": str(item.get("amount", ""))[:40], "source": str(item.get("source", ""))[:500]} for item in items[:50] if isinstance(item, dict)],
                 })
             action = message.get("proposed_action")
-            if isinstance(action, dict) and action.get("type") in {"customer.save", "customer.delete", "freight_rate.save", "freight.calculate", "salesperson.save", "salesperson.delete", "order.save", "commission_rule.save", "payroll.calculate", "rule.save", "quote.draft", "pi.draft"} and isinstance(action.get("data"), dict):
+            if isinstance(action, dict) and action.get("type") in {"customer.save", "customer.delete", "freight_rate.save", "freight.calculate", "freight.compare", "salesperson.save", "salesperson.delete", "order.save", "commission_rule.save", "payroll.calculate", "rule.save", "quote.draft", "pi.draft"} and isinstance(action.get("data"), dict):
                 safe["proposed_action"] = {"type": action["type"], "data": action["data"]}
         safe_messages.append(safe)
     if not safe_messages:
@@ -264,7 +264,21 @@ def compute_freight(data: dict[str, Any], rate: dict[str, Any] | None = None) ->
     min_charge = max(0.0, float(rate.get("minimum_charge", 0) or 0))
     fixed = max(0.0, float(rate.get("fixed_fee", 0) or 0))
     per_carton = max(0.0, float(rate.get("per_carton_fee", 0) or 0))
-    base = max(basis * rate_value, min_charge)
+    calculation_type = str(rate.get("calculation_type", "unit_rate"))
+    if calculation_type == "first_renewal":
+        first_weight = float(rate.get("first_weight") or 0)
+        first_price = float(rate.get("first_price") or 0)
+        additional_weight = float(rate.get("additional_weight") or 0)
+        additional_price = float(rate.get("additional_price") or 0)
+        if not all(value > 0 for value in (first_weight, first_price, additional_weight, additional_price)):
+            raise ValueError("首重/续重规则数据不完整，不能自动计算")
+        if unit != "kg":
+            raise ValueError("首重续重规则必须按 kg 计费")
+        billed_steps = max(0, int(__import__("math").ceil((basis - first_weight) / additional_weight)))
+        base = first_price + billed_steps * additional_price if basis > first_weight else first_price
+    else:
+        base = basis * rate_value
+    base = max(base, min_charge)
     total = round(base + fixed + per_carton * cartons, 2)
     incoterm = str(data.get("incoterm", "EXW")).upper()
     seller_pays = {"EXW": [], "FCA": ["origin"], "FAS": ["origin"], "FOB": ["origin"], "CFR": ["origin", "freight"], "CPT": ["origin", "freight"], "CIF": ["origin", "freight", "insurance"], "CIP": ["origin", "freight", "insurance"], "DAP": ["origin", "freight", "destination"], "DPU": ["origin", "freight", "destination"], "DDP": ["origin", "freight", "destination", "duties"]}.get(incoterm)
@@ -272,7 +286,7 @@ def compute_freight(data: dict[str, Any], rate: dict[str, Any] | None = None) ->
         raise ValueError("暂不支持该贸易条款的自动费用归属，请选择 Incoterms 2020 条款或手动核对")
     return {"rate_unit": unit, "rate": rate_value, "cartons": cartons, "volume_cbm": cbm, "gross_weight_kg": gross,
             "volumetric_weight_kg": round(volumetric_weight, 3), "chargeable_weight_kg": round(chargeable_weight, 3),
-            "basis_quantity": round(basis, 3), "base_freight": round(base, 2), "fixed_fee": fixed,
+            "basis_quantity": round(basis, 3), "base_freight": round(base, 2), "fixed_fee": fixed, "calculation_type": calculation_type,
             "per_carton_fee": per_carton, "freight_total": total, "currency": str(rate.get("currency", data.get("currency", "USD"))).upper(),
             "incoterm": incoterm, "seller_cost_components": seller_pays,
             "assumptions": ["体积重系数和最低收费按所选运费率记录；未提供保险、目的港费用或关税金额时不计入总额。"]}
@@ -314,41 +328,58 @@ def calculate_commission(seller_id: str, start_date: str, end_date: str) -> dict
 def import_freight_rows(filename: str, content: bytes, actor: str = "") -> list[dict[str, Any]]:
     suffix = Path(filename).suffix.lower()
     if suffix == ".csv":
-        rows = list(csv.DictReader(io.StringIO(content.decode("utf-8-sig", errors="replace"))))
+        sheets = [(Path(filename).stem, list(csv.DictReader(io.StringIO(content.decode("utf-8-sig", errors="replace")))))]
     elif suffix in {".xlsx", ".xlsm"}:
         from openpyxl import load_workbook
         workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-        sheet = workbook.active
-        iterator = sheet.iter_rows(values_only=True)
-        headers = [str(v or "").strip() for v in next(iterator, ())]
-        rows = [dict(zip(headers, values)) for values in iterator if any(v is not None for v in values)]
+        sheets = []
+        for sheet in workbook.worksheets:
+            iterator = sheet.iter_rows(values_only=True)
+            headers = [str(v or "").strip() for v in next(iterator, ())]
+            rows = [dict(zip(headers, values)) for values in iterator if any(v is not None for v in values)]
+            if rows:
+                sheets.append((sheet.title, rows))
     else:
         raise ValueError("运费表请上传 CSV 或 XLSX 文件")
-    aliases = {"起运地": "origin", "起运港": "origin", "origin": "origin", "出发地": "origin", "目的地": "destination", "目的港": "destination", "destination": "destination", "运输方式": "method", "运输": "method", "method": "method", "计价单位": "rate_unit", "单位": "rate_unit", "rate unit": "rate_unit", "计价方式": "rate_unit", "单价": "rate", "运价": "rate", "rate": "rate", "币种": "currency", "currency": "currency", "最低收费": "minimum_charge", "最低运费": "minimum_charge", "minimum charge": "minimum_charge", "固定费用": "fixed_fee", "fixed fee": "fixed_fee", "每箱费用": "per_carton_fee", "per carton fee": "per_carton_fee", "体积重系数": "volume_weight_kg_per_cbm", "kg/cbm": "volume_weight_kg_per_cbm", "生效日期": "effective_from", "有效期": "effective_from"}
+    aliases = {"起运地": "origin", "起运港": "origin", "origin": "origin", "出发地": "origin", "目的地": "destination", "目的港": "destination", "destination": "destination", "运输方式": "method", "运输": "method", "method": "method", "渠道": "channel", "产品名称": "channel", "服务名称": "channel", "service": "channel", "货代": "carrier", "货代公司": "carrier", "物流公司": "carrier", "承运商": "carrier", "carrier": "carrier", "计价单位": "rate_unit", "单位": "rate_unit", "rate unit": "rate_unit", "计价方式": "rate_unit", "计费方式": "rate_unit", "单价": "rate", "运价": "rate", "价格": "rate", "rate": "rate", "币种": "currency", "currency": "currency", "最低收费": "minimum_charge", "最低运费": "minimum_charge", "最低消费": "minimum_charge", "minimum charge": "minimum_charge", "固定费用": "fixed_fee", "操作费": "fixed_fee", "fixed fee": "fixed_fee", "每箱费用": "per_carton_fee", "每箱": "per_carton_fee", "per carton fee": "per_carton_fee", "体积重系数": "volume_weight_kg_per_cbm", "体积系数": "volume_weight_kg_per_cbm", "kg/cbm": "volume_weight_kg_per_cbm", "抛比": "volume_weight_kg_per_cbm", "首重": "first_weight", "首重价格": "first_price", "续重": "additional_weight", "续重价格": "additional_price", "生效日期": "effective_from", "有效期": "effective_from"}
+    unit_map = {"kg": "kg", "公斤": "kg", "千克": "kg", "cbm": "cbm", "立方": "cbm", "立方米": "cbm", "m3": "cbm", "m³": "cbm", "carton": "carton", "箱": "carton", "箱/件": "carton", "shipment": "shipment", "票": "shipment", "每票": "shipment"}
     saved = []
-    existing = {int(record["data"].get("source_row", -1)): record for record in list_records("freight_rate", limit=500) if record["data"].get("source_file") == filename}
-    seen_rows: set[int] = set()
-    for idx, row in enumerate(rows, 1):
-        mapped = {aliases.get(str(k or "").strip().casefold() if str(k or "").strip().casefold() in aliases else str(k or "").strip(), str(k or "").strip()): v for k, v in row.items()}
-        if not mapped.get("rate"):
-            continue
-        data = {k: v for k, v in mapped.items() if k in {"origin", "destination", "method", "rate_unit", "rate", "currency", "minimum_charge", "fixed_fee", "per_carton_fee", "volume_weight_kg_per_cbm", "effective_from"}}
-        try:
-            data["rate"] = float(str(data["rate"]).replace(",", ""))
-            data["minimum_charge"] = float(str(data.get("minimum_charge", 0) or 0).replace(",", ""))
-        except (TypeError, ValueError):
-            continue
-        data["rate_unit"] = str(data.get("rate_unit") or "cbm").lower()
-        data["source_file"] = filename[:240]
-        data["source_row"] = idx
-        data["name"] = " / ".join(str(data.get(k, "")) for k in ("origin", "destination", "method", "rate_unit", "rate") if str(data.get(k, ""))) or f"{filename} 第 {idx} 行"
-        if idx in existing:
-            data["id"] = existing[idx]["id"]
-        seen_rows.add(idx)
-        saved.append(save_record("freight_rate", data, actor))
+    existing = {(str(record["data"].get("source_sheet", "")), int(record["data"].get("source_row", -1))): record for record in list_records("freight_rate", limit=2000) if record["data"].get("source_file") == filename}
+    seen_rows: set[tuple[str, int]] = set()
+    source_row = 0
+    for sheet_name, rows in sheets:
+        for row in rows:
+            source_row += 1
+            mapped = {aliases.get(str(k or "").strip().casefold(), str(k or "").strip()): v for k, v in row.items()}
+            if not mapped.get("rate") and not mapped.get("first_price"):
+                continue
+            data = {k: v for k, v in mapped.items() if k in {"origin", "destination", "method", "channel", "carrier", "rate_unit", "rate", "currency", "minimum_charge", "fixed_fee", "per_carton_fee", "volume_weight_kg_per_cbm", "effective_from", "first_weight", "first_price", "additional_weight", "additional_price"}}
+            try:
+                for key in ("rate", "minimum_charge", "fixed_fee", "per_carton_fee", "volume_weight_kg_per_cbm", "first_weight", "first_price", "additional_weight", "additional_price"):
+                    if key in data and data[key] not in (None, ""):
+                        data[key] = float(str(data[key]).replace(",", ""))
+            except (TypeError, ValueError):
+                continue
+            raw_unit = str(data.get("rate_unit") or "").strip().casefold()
+            data["rate_unit"] = unit_map.get(raw_unit, raw_unit or "")
+            data["source_file"] = filename[:240]
+            data["source_sheet"] = sheet_name[:120]
+            data["source_row"] = source_row
+            data["carrier"] = str(data.get("carrier") or Path(filename).stem).strip()[:160]
+            data["calculation_type"] = "first_renewal" if data.get("first_weight") and data.get("first_price") and data.get("additional_weight") and data.get("additional_price") else "unit_rate"
+            if data["calculation_type"] == "first_renewal" and not data["rate_unit"]:
+                data["rate_unit"] = "kg"
+            data["classification_status"] = "confirmed_from_table" if data["rate_unit"] in {"kg", "cbm", "carton", "shipment"} else "needs_review"
+            data["formula_summary"] = (f"首重 {data.get('first_weight')} kg/{data.get('first_price')}，续重每 {data.get('additional_weight')} kg/{data.get('additional_price')}" if data["calculation_type"] == "first_renewal" else f"按 {data['rate_unit']} 计价；单价 {data.get('rate')}；最低收费 {data.get('minimum_charge', 0)}；固定费 {data.get('fixed_fee', 0)}；每箱费 {data.get('per_carton_fee', 0)}")
+            data["name"] = " / ".join(str(data.get(k, "")) for k in ("carrier", "channel", "origin", "destination", "method", "rate_unit", "rate") if str(data.get(k, ""))) or f"{filename} 第 {source_row} 行"
+            key = (sheet_name, source_row)
+            if key in existing:
+                data["id"] = existing[key]["id"]
+            seen_rows.add(key)
+            saved.append(save_record("freight_rate", data, actor))
     if saved:
-        for row_number, record in existing.items():
-            if row_number not in seen_rows:
+        for row_key, record in existing.items():
+            if (str(record["data"].get("source_sheet", "")), int(record["data"].get("source_row", -1))) not in seen_rows:
                 delete_record(record["id"], actor)
     return saved
 
