@@ -34,15 +34,20 @@ $('#chat-image').onchange = (event) => {
   selectedChatImage = event.target.files[0] || null;
   renderAttachment();
 };
+$('#image-threshold').oninput = (event) => {
+  $('#image-threshold-value').value = Number(event.target.value).toFixed(2);
+};
 
 function renderAttachment() {
   const holder = $('#chat-attachment');
   if (!selectedChatImage) {
     holder.hidden = true;
     holder.innerHTML = '';
+    $('#chat-image-options').hidden = true;
     return;
   }
   holder.hidden = false;
+  $('#chat-image-options').hidden = false;
   const preview = URL.createObjectURL(selectedChatImage);
   holder.innerHTML = `<img src="${preview}" alt="待发送图片"><span>${esc(selectedChatImage.name)}</span><button type="button" aria-label="移除图片">×</button>`;
   holder.querySelector('button').onclick = () => {
@@ -92,7 +97,7 @@ function renderReferences(bubble, data) {
   if (images.length) {
     const section = document.createElement('div');
     section.className = 'chat-image-matches';
-    section.innerHTML = `<b>相似产品图片 (${images.length})</b><div class="chat-match-grid">${images.map((item) => `<a href="/api/files/${item.file_id}/open" target="_blank"><img src="${item.preview_url}" loading="lazy" alt="${esc(item.name)}"><span>${esc(item.name)}</span></a>`).join('')}</div>`;
+    section.innerHTML = `<b>相似产品图片 (${images.length})</b><div class="chat-match-grid">${images.map((item) => `<a href="/api/files/${item.file_id}/open" target="_blank"><img src="${item.preview_url}" loading="lazy" alt="${esc(item.name)}"><span>${esc(item.name)}</span><small>相似度 ${Number(item.similarity).toFixed(3)}</small></a>`).join('')}</div>`;
     body.append(section);
   }
 }
@@ -121,6 +126,7 @@ $('#chat-form').onsubmit = async (event) => {
   form.append('message', message);
   form.append('history', JSON.stringify(chatHistory.slice(-8)));
   form.append('model_id', $('#chat-model-select').value || 'local');
+  form.append('image_threshold', $('#image-threshold').value || '0.20');
   if (image) form.append('image', image);
 
   try {

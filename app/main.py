@@ -551,8 +551,9 @@ async def answer(payload: dict[str, Any]):
     return {"answer": answer_text, "sources": found, "model": model}
 
 
-def image_matches(query_image: Image.Image, limit: int = 12) -> dict[str, Any]:
+def image_matches(query_image: Image.Image, limit: int = 12, min_similarity: float = 0.0) -> dict[str, Any]:
     query_hash = imagehash.phash(query_image)
+    min_similarity = max(0.0, min(0.8, min_similarity))
     results = []
     mode = os.getenv("IMAGE_SEARCH_MODE", "phash").lower()
     if mode == "clip":
@@ -566,6 +567,7 @@ def image_matches(query_image: Image.Image, limit: int = 12) -> dict[str, Any]:
             stored = json.loads(row["image_embedding"])
             score = sum(a*b for a,b in zip(query_vector,stored))
             results.append({"file_id":row["id"],"name":row["name"],"path":row["path"],"similarity":round(score,4),"preview_url":f"/api/files/{row['id']}/preview"})
+        results = [x for x in results if x["similarity"] >= min_similarity]
         results.sort(key=lambda x:x["similarity"],reverse=True)
         method = "OpenCLIP visual similarity"
     else:
@@ -574,9 +576,10 @@ def image_matches(query_image: Image.Image, limit: int = 12) -> dict[str, Any]:
         for row in rows:
             distance = query_hash - imagehash.hex_to_hash(row["image_hash"])
             results.append({"file_id":row["id"],"name":row["name"],"path":row["path"],"distance":distance,"similarity":round(1-distance/64,3),"preview_url":f"/api/files/{row['id']}/preview"})
+        results = [x for x in results if x["similarity"] >= min_similarity]
         results.sort(key=lambda x:x["distance"])
         method = "pHash near-duplicate matching"
-    return {"results":results[:max(1,min(limit,50))],"method":method}
+    return {"results":results[:max(1,min(limit,50))],"method":method,"min_similarity":min_similarity}
 
 
 def related_text_for_images(matches: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
@@ -610,6 +613,7 @@ async def assistant_chat(
     image: UploadFile | None = File(default=None),
     history: str = Form(default="[]"),
     model_id: str = Form(default="local"),
+    image_threshold: float = Form(default=0.20),
 ) -> dict[str, Any]:
     """Chat over local product documents, optionally grounded by a submitted image."""
     question = message.strip()[:3000]
@@ -625,7 +629,7 @@ async def assistant_chat(
             query_image = Image.open(io.BytesIO(raw_image)).convert("RGB")
         except Exception:
             raise HTTPException(400, "Unsupported or invalid image")
-        matches = image_matches(query_image, 8)
+        matches = image_matches(query_image, 8, image_threshold)
         image_results, image_method = matches["results"], matches["method"]
 
     text_results = text_search(q=question, limit=8)["results"] if question else []
@@ -701,7 +705,7 @@ async def assistant_chat(
 
 
 @app.post("/api/search/image")
-async def image_search(image: UploadFile = File(...), limit: int = Form(12)) -> dict[str, Any]:
+async def image_search(image: UploadFile = File(...), limit: int = Form(12), min_similarity: float = Form(default=0.0)) -> dict[str, Any]:
     raw = await image.read(MAX_UPLOAD + 1)
     if len(raw) > MAX_UPLOAD:
         raise HTTPException(413, f"Image exceeds {MAX_UPLOAD // 1024 // 1024} MB")
@@ -709,7 +713,7 @@ async def image_search(image: UploadFile = File(...), limit: int = Form(12)) -> 
         query_image = Image.open(io.BytesIO(raw)).convert("RGB")
     except Exception:
         raise HTTPException(400, "Unsupported or invalid image")
-    return image_matches(query_image, limit)
+    return image_matches(query_image, limit, min_similarity)
 
 
 @app.get("/api/files/{file_id}/preview")
