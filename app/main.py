@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import io
-import json
 import asyncio
 import json
 import os
@@ -15,8 +14,9 @@ from typing import Any
 
 import imagehash
 from docx import Document
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from openpyxl import load_workbook
 from PIL import Image
@@ -28,16 +28,33 @@ ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
 LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", "./library")).resolve()
 DB_PATH = DATA_DIR / "library.sqlite3"
+CONFIG_PATH = DATA_DIR / "settings.json"
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024
 SYNC_INTERVAL = max(0, int(os.getenv("SYNC_INTERVAL_SECONDS", "300")))
 SUPPORTED = {".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
-app = FastAPI(title="Xudaai Product Library", version="0.1.0")
+basic_auth = HTTPBasic(auto_error=False)
+
+
+def require_auth(credentials: HTTPBasicCredentials | None = Depends(basic_auth)):
+    expected_password = os.getenv("APP_PASSWORD", "")
+    if not expected_password:
+        return
+    expected_user = os.getenv("APP_USER", "admin")
+    if not credentials or not hmac.compare_digest(credentials.username, expected_user) or not hmac.compare_digest(credentials.password, expected_password):
+        raise HTTPException(status_code=401, detail="Authentication required", headers={"WWW-Authenticate": "Basic"})
+
+
+app = FastAPI(title="Xudaai Product Library", version="0.2.0", dependencies=[Depends(require_auth)])
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 _sync_task: asyncio.Task | None = None
 _clip_model: Any = None
 _clip_preprocess: Any = None
 _clip_torch: Any = None
+_dingtalk_task: asyncio.Task | None = None
+_whisper_model: Any = None
+VIDEO_TYPES = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mp3", ".wav", ".m4a", ".aac"}
+SUPPORTED.update(VIDEO_TYPES)
 
 
 def db() -> sqlite3.Connection:
@@ -69,6 +86,26 @@ def init_db() -> None:
             c.execute("ALTER TABLE files ADD COLUMN image_embedding TEXT")
 
 
+def model_config() -> dict[str, str]:
+    config = {"provider": os.getenv("MODEL_PROVIDER", "openai-compatible"), "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"), "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"), "api_key": os.getenv("OPENAI_API_KEY", "")}
+    if CONFIG_PATH.exists():
+        try:
+            saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            config.update({k: str(v) for k,v in saved.items() if k in config})
+        except (OSError, ValueError):
+            pass
+    return config
+
+
+def save_model_config(config: dict[str, str]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        CONFIG_PATH.chmod(0o600)
+    except OSError:
+        pass
+
+
 def visual_embedding(image: Image.Image) -> list[float]:
     global _clip_model, _clip_preprocess, _clip_torch
     if _clip_model is None:
@@ -97,11 +134,46 @@ def sha256(path: Path) -> str:
 
 def extract(path: Path) -> list[tuple[int | None, str]]:
     ext = path.suffix.lower()
+    if ext in VIDEO_TYPES:
+        if os.getenv("ENABLE_MEDIA_AI", "false").lower() != "true":
+            return [(None, f"视频/音频文件：{path.name}。请启用 ENABLE_MEDIA_AI 并安装媒体依赖，以索引音视频内容。")]
+        global _whisper_model
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as e:
+            raise RuntimeError("启用音视频转写需要安装 requirements-media.txt") from e
+        if _whisper_model is None:
+            _whisper_model = WhisperModel(os.getenv("WHISPER_MODEL", "small"), device="cpu", compute_type="int8")
+        segments, _ = _whisper_model.transcribe(str(path), vad_filter=True)
+        return [(int(seg.start), seg.text.strip()) for seg in segments if seg.text.strip()]
     if ext in IMAGE_TYPES:
-        return []
+        try:
+            import pytesseract
+            with Image.open(path) as im:
+                ocr = pytesseract.image_to_string(im, lang=os.getenv("OCR_LANG", "chi_sim+eng"))
+            return [(None, ocr)] if ocr.strip() else []
+        except (ImportError, OSError):
+            return []
     if ext == ".pdf":
         reader = PdfReader(str(path))
-        return [(i + 1, p.extract_text() or "") for i, p in enumerate(reader.pages)]
+        pages = [(i + 1, p.extract_text() or "") for i, p in enumerate(reader.pages)]
+        if any(text.strip() for _, text in pages):
+            return pages
+        if os.getenv("ENABLE_MEDIA_AI", "false").lower() == "true":
+            try:
+                import fitz
+                import pytesseract
+                from PIL import Image
+                ocr_pages=[]
+                pdf=fitz.open(path)
+                for i,page in enumerate(pdf):
+                    pix=page.get_pixmap(matrix=fitz.Matrix(2,2),alpha=False)
+                    image=Image.frombytes("RGB",[pix.width,pix.height],pix.samples)
+                    ocr_pages.append((i+1,pytesseract.image_to_string(image,lang=os.getenv("OCR_LANG","chi_sim+eng"))))
+                return ocr_pages
+            except (ImportError, OSError):
+                return pages
+        return pages
     if ext == ".docx":
         d = Document(path)
         blocks = [p.text for p in d.paragraphs if p.text.strip()]
@@ -214,15 +286,24 @@ async def periodic_sync() -> None:
 
 @app.on_event("startup")
 async def start_periodic_sync() -> None:
-    global _sync_task
+    global _sync_task, _dingtalk_task
     if SYNC_INTERVAL:
         _sync_task = asyncio.create_task(periodic_sync())
+    if os.getenv("DINGTALK_ENABLED", "false").lower() == "true":
+        client_id = os.getenv("DINGTALK_CLIENT_ID", "")
+        client_secret = os.getenv("DINGTALK_CLIENT_SECRET", "")
+        if not client_id or not client_secret:
+            raise RuntimeError("DINGTALK_ENABLED requires DINGTALK_CLIENT_ID and DINGTALK_CLIENT_SECRET")
+        from .dingtalk import run_stream
+        _dingtalk_task = asyncio.create_task(run_stream(client_id, client_secret, answer, lambda q: text_search(q=q)))
 
 
 @app.on_event("shutdown")
 async def stop_periodic_sync() -> None:
     if _sync_task:
         _sync_task.cancel()
+    if _dingtalk_task:
+        _dingtalk_task.cancel()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -236,7 +317,47 @@ def status() -> dict[str, Any]:
         total = c.execute("SELECT COUNT(*) FROM files").fetchone()[0]
         errs = c.execute("SELECT COUNT(*) FROM files WHERE status='error'").fetchone()[0]
         latest = c.execute("SELECT MAX(indexed_at) FROM files").fetchone()[0]
-    return {"library_dir": str(LIBRARY_DIR), "total_files": total, "errors": errs, "last_indexed": latest, "sync_interval_seconds": SYNC_INTERVAL, "dingtalk_enabled": os.getenv("DINGTALK_ENABLED", "false").lower() == "true", "answer_enabled": bool(os.getenv("OPENAI_API_KEY"))}
+    cfg = model_config()
+    return {"library_dir": str(LIBRARY_DIR), "total_files": total, "errors": errs, "last_indexed": latest, "sync_interval_seconds": SYNC_INTERVAL, "dingtalk_enabled": os.getenv("DINGTALK_ENABLED", "false").lower() == "true", "answer_enabled": bool(cfg["api_key"]) or cfg["provider"] == "ollama", "model_provider": cfg["provider"], "model_name": cfg["model"]}
+
+
+@app.get("/api/config/model")
+def get_model_config():
+    cfg = model_config()
+    return {"provider": cfg["provider"], "base_url": cfg["base_url"], "model": cfg["model"], "has_api_key": bool(cfg["api_key"])}
+
+
+@app.put("/api/config/model")
+def put_model_config(payload: dict[str, Any]):
+    current = model_config()
+    provider = str(payload.get("provider", current["provider"]))
+    defaults = {"deepseek": ("https://api.deepseek.com/v1", "deepseek-chat"), "openai": ("https://api.openai.com/v1", "gpt-4o-mini"), "ollama": ("http://host.docker.internal:11434/v1", "qwen2.5:7b"), "openai-compatible": (current["base_url"], current["model"])}
+    if provider not in defaults:
+        raise HTTPException(400, "Unsupported model provider")
+    default_url, default_model = defaults[provider]
+    base_url = str(payload.get("base_url") or default_url).strip().rstrip("/")
+    model = str(payload.get("model") or default_model).strip()
+    key = "" if payload.get("clear_api_key") else str(payload.get("api_key") or current["api_key"]).strip()
+    if not base_url.startswith(("https://", "http://")) or not model:
+        raise HTTPException(400, "A valid model URL and model name are required")
+    new_config = {"provider":provider,"base_url":base_url,"model":model,"api_key":key}
+    save_model_config(new_config)
+    return {"saved":True,"provider":provider,"base_url":base_url,"model":model,"has_api_key":bool(key)}
+
+
+@app.post("/api/config/model/test")
+async def test_model_config():
+    cfg = model_config()
+    headers = {"Authorization": f"Bearer {cfg['api_key']}"} if cfg["api_key"] else {}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(f"{cfg['base_url'].rstrip('/')}/chat/completions",headers=headers,json={"model":cfg["model"],"max_tokens":8,"messages":[{"role":"user","content":"Reply with OK"}]})
+            response.raise_for_status()
+            return {"ok":True,"model":cfg["model"],"message":"连接成功"}
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"Model service returned HTTP {e.response.status_code}")
+    except httpx.HTTPError:
+        raise HTTPException(502, "无法连接到模型服务，请检查地址和网络")
 
 
 @app.post("/api/index/sync")
@@ -272,12 +393,25 @@ async def upload_files(files: list[UploadFile] = File(...)) -> dict[str, Any]:
 
 @app.post("/api/search/text")
 def text_search(q: str = Form(...), limit: int = Form(8)) -> dict[str, Any]:
+    q = q.strip()[:300]
     terms = [t for t in re.findall(r"[\w-]+", q) if len(t) > 1]
+    if not terms:
+        terms = [q] if q else []
     if not terms:
         return {"query": q, "results": []}
     match = " OR ".join('"' + t.replace('"','') + '"' for t in terms[:20])
     with db() as c:
         rows = c.execute("SELECT f.id file_id,f.name,f.path,f.ext,x.page,x.content,bm25(chunks_fts) rank FROM chunks_fts x JOIN files f ON f.id=CAST(x.file_id AS INTEGER) WHERE chunks_fts MATCH ? AND f.status='ready' ORDER BY rank LIMIT ?", (match,max(1,min(limit,30)))).fetchall()
+        if not rows and re.search(r"[\u3400-\u9fff]", q):
+            # SQLite's unicode61 tokenizer does not segment Chinese words. Fall back
+            # to literal phrase and adjacent-character matching for Chinese queries.
+            like = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            rows = c.execute("SELECT f.id file_id,f.name,f.path,f.ext,x.page,x.content,0 rank FROM chunks x JOIN files f ON f.id=x.file_id WHERE x.content LIKE ? ESCAPE '\\' AND f.status='ready' ORDER BY f.name LIMIT ?", (f"%{like}%",max(1,min(limit,30)))).fetchall()
+            if not rows:
+                bigrams = list(dict.fromkeys(q[i:i+2] for i in range(max(1,len(q)-1)) if re.search(r"[\u3400-\u9fff]", q[i:i+2])))[:12]
+                if bigrams:
+                    clauses = " OR ".join("x.content LIKE ?" for _ in bigrams)
+                    rows = c.execute(f"SELECT f.id file_id,f.name,f.path,f.ext,x.page,x.content,0 rank FROM chunks x JOIN files f ON f.id=x.file_id WHERE ({clauses}) AND f.status='ready' LIMIT ?", (*[f"%{x}%" for x in bigrams],max(1,min(limit,30)))).fetchall()
     return {"query": q, "results": [{"file_id":r["file_id"],"name":r["name"],"path":r["path"],"ext":r["ext"],"page":r["page"],"snippet":r["content"][:700],"preview_url":f"/api/files/{r['file_id']}/preview" if r["ext"] in IMAGE_TYPES else None} for r in rows]}
 
 
@@ -287,18 +421,20 @@ async def answer(payload: dict[str, Any]):
     question = str(payload.get("question", "")).strip()
     if not question:
         raise HTTPException(400, "Question is required")
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
+    cfg = model_config()
+    api_key = cfg["api_key"]
+    if not api_key and cfg["provider"] != "ollama":
         raise HTTPException(503, "AI answer is not configured. Set OPENAI_API_KEY or use /api/search/text.")
     found = text_search(q=question, limit=8)["results"]
     if not found:
         return {"answer": "在当前已索引资料中没有找到可靠依据。", "sources": []}
     context = "\n\n".join(f"[来源 {i+1}] 文件：{x['path']}；页码：{x['page'] or '未标注'}\n{x['snippet']}" for i,x in enumerate(found))
-    base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    base = cfg["base_url"].rstrip("/")
+    model = cfg["model"]
     try:
         async with httpx.AsyncClient(timeout=90) as client:
-            response = await client.post(f"{base}/chat/completions", headers={"Authorization": f"Bearer {api_key}"}, json={"model": model, "temperature": 0.1, "messages": [{"role": "system", "content": "你是产品资料助手。只能依据用户提供的资料片段回答，不要补充片段中没有的产品事实。若资料不足，明确说明。回答末尾列出引用来源编号。"}, {"role": "user", "content": f"资料片段：\n{context}\n\n问题：{question}"}]})
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            response = await client.post(f"{base}/chat/completions", headers=headers, json={"model": model, "temperature": 0.1, "messages": [{"role": "system", "content": "你是产品资料助手。只能依据用户提供的资料片段回答，不要补充片段中没有的产品事实。若资料不足，明确说明。回答末尾列出引用来源编号。"}, {"role": "user", "content": f"资料片段：\n{context}\n\n问题：{question}"}]})
             response.raise_for_status()
             answer_text = response.json()["choices"][0]["message"]["content"]
     except httpx.HTTPStatusError as e:

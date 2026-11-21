@@ -9,8 +9,9 @@
 - 文档解析：PDF、DOCX、XLSX、PPTX、TXT、Markdown、CSV。
 - 图片索引：支持 pHash 近重复检索；设置 `IMAGE_SEARCH_MODE=clip` 并以 `ENABLE_CLIP=1` 构建后，使用 OpenCLIP 做语义/视觉相似检索。CLIP 首次使用会下载模型并消耗较多内存和存储，需确认 NAS CPU 架构有可用的 PyTorch wheel。
 - API：`/api/search/text`、`/api/search/image`、`/api/index/sync`、`/api/files/{id}/preview`。
-- 钉钉：提供 `/api/dingtalk/webhook` 的开发期适配契约，接入统一文本检索。它目前不是完整的钉钉企业应用回调实现；正式接入需按机器人类型完成回调验签/解密、事件解析、主动回复和图片上传。
-- 可选 AI 问答：配置 OpenAI 兼容接口的 API Key、服务地址和模型，回答严格基于检索片段并附来源。ChatGPT Plus/Pro 订阅不能替代 API Key；也可后续增加 Ollama 适配器。
+- 钉钉：使用官方 `dingtalk-stream` SDK 的 Stream 长连接机器人，配置企业内部应用 Client ID/Secret 即可启用；无需暴露公网回调。机器人复用统一检索和模型回答。
+- 模型设置页：可选 DeepSeek、OpenAI、任意 OpenAI 兼容服务或 Ollama，设置 Base URL、模型名和密钥，并测试连接。密钥保存在 `data/settings.json`，页面不回显。
+- 可选媒体处理：启用 `ENABLE_MEDIA_AI` 后，扫描件 PDF/图片可做 OCR，音视频可用 Faster Whisper 转写并按时间点检索。
 
 ## 本地开发
 
@@ -22,6 +23,8 @@ python -m venv .venv
 pip install -r requirements.txt
 # Optional, for CLIP semantic image search:
 pip install -r requirements-clip.txt
+# Optional, for scanned-document OCR and audio/video transcription:
+pip install -r requirements-media.txt
 Copy-Item .env.example .env
 New-Item -ItemType Directory -Force library, data | Out-Null
 uvicorn app.main:app --reload
@@ -39,6 +42,8 @@ docker compose up -d --build
 
 默认网页端口为 `8000`。`.env` 中 `LIBRARY_HOST_PATH` 指向原始资料目录，`APP_DATA_HOST_PATH` 指向数据库/索引目录，`APP_PORT` 设置网页端口。NAS 上把这两个值改为 NAS 上实际目录（例如 `/volume1/docker/xudaai/library`、`/volume1/docker/xudaai/data`），再将项目 Compose 文件部署到 NAS。应用内路径保持 `/srv/app/library` 与 `/srv/app/data` 不变。资料目录需允许应用容器读写（网页上传功能需要写权限）。迁移时保留配置、数据库和资料目录；也可以复制原始资料后执行一次同步重建索引。
 
+首次部署前设置 `.env` 中的 `APP_PASSWORD`。OpenCLIP 语义图搜默认开启；不支持 PyTorch 的 NAS 可将 `ENABLE_CLIP=0`、`IMAGE_SEARCH_MODE=phash`。如需 OCR/音视频转写，设 `ENABLE_MEDIA_AI=1` 后重新构建，首次转写会下载 Whisper 模型。模型设置页可直接选择 DeepSeek 并填入 API Key，无需改代码；API Key 会保存在映射到 NAS 的 `data/settings.json` 中，迁移时应妥善保护该文件。
+
 ## 资料维护机制
 
 每个文件记录相对路径、大小、修改时间、SHA-256、状态和索引时间。同步使用 SHA-256 识别实际内容变化：新增/变化的文件重新解析，删除文件从索引移除，未变化文件跳过。解析失败保留错误信息，可修复源文件后再次同步。
@@ -53,18 +58,20 @@ curl.exe -X POST -F "image=@sample.jpg" http://127.0.0.1:8000/api/search/image
 curl.exe -X POST http://127.0.0.1:8000/api/index/sync
 ```
 
-## 钉钉与 MCP 规划
+## 钉钉设置
 
-- 钉钉入口应作为独立 adapter 调用 `/api/search/*`，不得自行读取文件或访问数据库。
-- 启用当前 webhook 示例：设置 `DINGTALK_ENABLED=true` 与随机 `DINGTALK_TOKEN`。此 token header 是开发期占位鉴权；上线前应替换为对应钉钉应用的官方回调签名/加密校验，并实现主动回复、重试和幂等处理。
-- 钉钉通常需要可访问的 HTTPS 回调地址；部署到本地电脑/NAS 时需配置安全隧道或受控公网入口，避免裸露管理接口。
-- MCP 可在检索 API 稳定后实现为薄适配层，复用相同搜索服务。
+1. 在钉钉开放平台创建企业内部应用，启用机器人并选择 Stream 模式。
+2. 在 `.env` 配置 `DINGTALK_ENABLED=true`、`DINGTALK_CLIENT_ID` 和 `DINGTALK_CLIENT_SECRET`。
+3. `docker compose up -d --build` 后，机器人通过出站长连接接收消息；家庭网络无需设置入站端口映射。
+4. 在模型设置页选择 DeepSeek 等兼容服务，或使用 Ollama；钉钉机器人的问答会复用该设置。没有模型时退化为资料检索结果。
 
-## 当前边界
+## 安全与能力边界
 
-- 当前文本检索是 SQLite FTS 关键词检索；配置 API Key 后可基于检索片段生成大模型答案。ChatGPT 订阅不能作为 API 计费凭证。
-- 扫描版 PDF OCR、视频字幕/关键帧检索、网页用户权限控制和钉钉官方回调协议尚未实现。
-- 当前默认无网页用户认证，只应在可信本机或局域网环境试用，不要直接暴露到公网。钉钉 webhook token 是开发期占位，不足以用于公网生产。
+- 文本检索使用 SQLite FTS；中文查询支持相邻字符回退检索。模型回答基于命中片段并返回来源。ChatGPT Plus/Pro 订阅不能代替模型 API Key；可在模型设置页接 DeepSeek 等兼容 API，或接本地 Ollama。
+- OpenCLIP 语义图搜需 `ENABLE_CLIP=1`，首次索引会下载模型。视频检索以音轨转写为主，不会自动理解整段视频画面。
+- 设置 `APP_PASSWORD` 可启用浏览器/API 的 HTTP Basic 登录。未设置密码时只限可信局域网使用，不要直接暴露公网。请给 NAS 配强密码并限制访问网段。
+- 钉钉机器人通过 Stream 出站连接运行；配置应用凭据后可在内部团队使用。回传图片预览给钉钉的能力还需配置可访问的 HTTPS 文件地址。
+- ChatGPT MCP 连接需要公网 HTTPS 与单独的访问授权；当前版本集中完成浏览器和钉钉入口，MCP 远程入口需后续单独启用，不能直接把本机地址交给 ChatGPT 云端访问。
 
 ## 迁移到 NAS
 

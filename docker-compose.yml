@@ -4,6 +4,7 @@ services:
       context: .
       args:
         ENABLE_CLIP: ${ENABLE_CLIP:-0}
+        ENABLE_MEDIA_AI: ${ENABLE_MEDIA_AI:-0}
     container_name: xudaai-library
     env_file: .env
     ports:
