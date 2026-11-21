@@ -1,0 +1,11 @@
+services:
+  xudaai-library:
+    build: .
+    container_name: xudaai-library
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/srv/app/data
+      - ./library:/srv/app/library:ro
+    restart: unless-stopped
