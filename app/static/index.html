@@ -15,6 +15,11 @@
     <section class="tab-panel active" id="ask">
       <div class="chat-shell">
         <div class="chat-intro"><div class="chat-intro-copy"><span class="eyebrow">PRODUCT KNOWLEDGE ASSISTANT</span><h2>产品资料 AI 助手</h2><p>直接提问或附图检索；勾选多个匹配产品后，可整理成报价单或 PI PDF。</p><div class="document-actions"><button type="button" id="start-quote" class="secondary">生成产品报价</button><button type="button" id="start-pi" class="secondary">生成 PI 形式发票</button></div></div><button id="open-model-settings" class="chat-settings-button" type="button"><span>⚙</span><span><b>模型设置</b><small id="chat-model-status">读取中…</small></span></button></div>
+        <div class="assistant-workspaces" id="assistant-workspaces" role="tablist" aria-label="AI 功能窗口">
+          <button type="button" class="active" data-workspace="product">产品资料</button><button type="button" data-workspace="freight">运费与贸易</button><button type="button" data-workspace="quote">报价</button><button type="button" data-workspace="pi">PI 合同</button><button type="button" data-workspace="customer">客户</button><button type="button" data-workspace="sales">销售</button><button type="button" data-workspace="payroll">业绩与薪酬</button><button type="button" data-workspace="rules">团队规则</button>
+        </div>
+        <div class="workspace-toolbar"><label>团队对话<select id="conversation-select"><option value="">新对话</option></select></label><button type="button" id="new-conversation" class="secondary">＋ 新对话</button><label class="secondary workspace-upload-button">＋ 上传到当前助手<input id="workspace-upload" type="file" multiple hidden></label><button type="button" id="manage-team-rules" class="secondary">团队规则</button></div>
+        <p class="workspace-description" id="workspace-description">查产品、图片、规格和价格；答案附资料来源。</p>
         <div id="chat-thread" class="chat-thread" aria-live="polite">
           <div class="chat-welcome"><div class="assistant-mark">✧</div><div><b>你好，我可以帮你查产品资料</b><p>试试问“这个产品有哪些配件？”或上传图片后问“帮我找这款产品的参数”。</p></div></div>
         </div>
@@ -43,6 +48,11 @@
           <div class="model-actions"><button type="submit" class="primary">保存设置</button><button type="button" class="secondary" id="test-model">测试连接</button><span id="model-state"></span></div>
         </form>
         <p class="model-dialog-note">模型服务商会收到你发送的问题、图片和命中的资料片段。API Key 仅保存在本机应用数据目录。</p>
+      </dialog>
+      <dialog id="rules-dialog" class="model-dialog">
+        <div class="model-dialog-head"><div><span class="eyebrow">SHARED TEAM PLAYBOOK</span><h2>团队规则</h2></div><button id="close-rules" type="button" aria-label="关闭">×</button></div>
+        <p class="model-dialog-intro">已发布规则由各 AI 助手共享。修改会保留版本和操作记录。</p>
+        <form id="rule-form" class="settings-card"><input type="hidden" name="id"><label>规则名称<input name="name" required placeholder="例如：报价币种与有效期"></label><label>应用窗口<select name="workspace"><option value="all">所有助手</option><option value="product">产品资料</option><option value="freight">运费与贸易</option><option value="quote">报价</option><option value="pi">PI 合同</option><option value="customer">客户</option><option value="sales">销售</option><option value="payroll">业绩与薪酬</option></select></label><label>规则内容<textarea name="body" rows="5" required placeholder="写清楚规则、计算口径和生效范围"></textarea></label><div class="model-actions"><button class="primary" type="submit">发布共享规则</button><span id="rule-state"></span></div></form><div id="team-rules-list" class="team-rules-list"></div>
       </dialog>
       <dialog id="quote-dialog" class="model-dialog quote-dialog">
         <div class="model-dialog-head"><div><span class="eyebrow">DOCUMENT BUILDER</span><h2>报价单 / PI</h2></div><button id="close-quote-dialog" type="button" aria-label="关闭">×</button></div>
@@ -86,7 +96,7 @@
               <label>币种<select name="currency"><option>USD</option><option>EUR</option><option>CNY</option><option>GBP</option><option>JPY</option></select></label>
               <label>汇率（选填）<input name="exchange_rate" type="number" min="0" step="0.0001" placeholder="仅记录，不自动换算"></label>
               <label>汇率基准日<input name="exchange_date" type="date"></label>
-              <label>贸易条款<select name="incoterm"><option value="EXW">EXW 工厂交货</option><option value="FOB">FOB 装运港船上交货</option><option value="CIF">CIF 成本、保险费加运费</option><option value="CFR">CFR 成本加运费</option><option value="DDP">DDP 完税后交货</option><option value="custom">自定义</option></select><input name="incoterm_custom" placeholder="填写自定义贸易条款" hidden></label>
+              <label>贸易条款<select name="incoterm"><option value="EXW">EXW 工厂交货</option><option value="FCA">FCA 货交承运人</option><option value="FAS">FAS 船边交货</option><option value="FOB">FOB 装运港船上交货</option><option value="CFR">CFR 成本加运费</option><option value="CIF">CIF 成本、保险费加运费</option><option value="CPT">CPT 运费付至</option><option value="CIP">CIP 运费和保险费付至</option><option value="DAP">DAP 目的地交货</option><option value="DPU">DPU 目的地卸货后交货</option><option value="DDP">DDP 完税后交货</option><option value="custom">自定义</option></select><input name="incoterm_custom" placeholder="填写自定义贸易条款" hidden></label>
               <label>起运港<input name="origin_port" placeholder="例如 Shenzhen"></label>
               <label>目的港<input name="destination_port" placeholder="例如 Los Angeles"></label>
               <label>保险<select name="insurance_term"><option value="Buyer">买方承担</option><option value="Seller">卖方承担</option><option value="Included">已含保险</option><option value="N/A">不适用</option></select></label>
@@ -100,7 +110,11 @@
               <label class="quote-wide">收款/银行信息<input name="bank_details" placeholder="PI 可填写收款账户信息"></label>
             </div>
             <div class="quote-fields quote-costs">
+              <label>起运地费用<input name="origin_charges" type="number" min="0" step="0.01" value="0"></label>
               <label>运费<input name="shipping" type="number" min="0" step="0.01" value="0"></label>
+              <label>保险费<input name="insurance_amount" type="number" min="0" step="0.01" value="0"></label>
+              <label>目的地费用<input name="destination_charges" type="number" min="0" step="0.01" value="0"></label>
+              <label>关税<input name="duties" type="number" min="0" step="0.01" value="0"></label>
               <label>其他费用<input name="other_fees" type="number" min="0" step="0.01" value="0"></label>
               <label class="quote-wide">备注<textarea name="notes" rows="2" placeholder="交期、包装、报价说明等"></textarea></label>
             </div>

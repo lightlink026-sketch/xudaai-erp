@@ -27,6 +27,42 @@ def _money(value: Any, field: str, places: int) -> Decimal:
     return number.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
 
 
+def calculate_cost_breakdown(incoterm: str, values: dict[str, Decimal], shipping_term: str, insurance_term: str, tax_term: str) -> tuple[list[dict[str, Any]], Decimal]:
+    """Apply seller-paid cost components using the selected trade term."""
+    term = incoterm.strip().upper()
+    required = {
+        "EXW": set(), "FCA": {"origin_charges"}, "FAS": {"origin_charges"}, "FOB": {"origin_charges"},
+        "CFR": {"origin_charges", "shipping"}, "CPT": {"origin_charges", "shipping"},
+        "CIF": {"origin_charges", "shipping", "insurance_amount"}, "CIP": {"origin_charges", "shipping", "insurance_amount"},
+        "DAP": {"origin_charges", "shipping", "destination_charges"}, "DPU": {"origin_charges", "shipping", "destination_charges"},
+        "DDP": {"origin_charges", "shipping", "destination_charges", "duties"},
+    }
+    if term in required:
+        included = set(required[term])
+        if term not in {"CIF", "CIP"} and insurance_term.strip().casefold() in {"seller", "included", "卖方承担", "已含保险"}:
+            included.add("insurance_amount")
+    else:
+        included = {"shipping"} if shipping_term.strip().casefold() in {"included", "含运费", "已含"} else set()
+        if insurance_term.strip().casefold() in {"seller", "included", "卖方承担", "已含保险"}:
+            included.add("insurance_amount")
+    if tax_term.strip().casefold() in {"included", "含税", "已含"}:
+        included.add("tax_amount")
+    labels = {
+        "origin_charges": ("起运地费用", "Origin charges"), "shipping": ("运费", "Freight"),
+        "insurance_amount": ("保险费", "Insurance"), "destination_charges": ("目的地费用", "Destination charges"),
+        "duties": ("关税", "Duties"), "other_fees": ("其他费用", "Other charges"), "tax_amount": ("税额", "Tax"),
+    }
+    result = []
+    total = Decimal("0")
+    for key, (zh, en) in labels.items():
+        amount = values.get(key, Decimal("0"))
+        is_included = key in included or key == "other_fees"
+        result.append({"key": key, "label_zh": zh, "label_en": en, "amount": str(amount), "included": is_included})
+        if is_included:
+            total += amount
+    return result, total
+
+
 def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
     currency = str(payload.get("currency", "USD")).strip().upper()
     if not re.fullmatch(r"[A-Z]{3}", currency):
@@ -83,8 +119,21 @@ def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
     shipping = _money(payload.get("shipping", 0), "运费", places)
     other_fees = _money(payload.get("other_fees", 0), "其他费用", places)
     tax_amount = _money(payload.get("tax_amount", 0), "税额", places)
-    if shipping < 0 or other_fees < 0 or tax_amount < 0:
-        raise HTTPException(422, "运费和其他费用不能为负数")
+    origin_charges = _money(payload.get("origin_charges", 0), "起运地费用", places)
+    insurance_amount = _money(payload.get("insurance_amount", 0), "保险费", places)
+    destination_charges = _money(payload.get("destination_charges", 0), "目的地费用", places)
+    duties = _money(payload.get("duties", 0), "关税", places)
+    if any(value < 0 for value in (shipping, other_fees, tax_amount, origin_charges, insurance_amount, destination_charges, duties)):
+        raise HTTPException(422, "各项费用不能为负数")
+    incoterm = str(payload.get("incoterm", "EXW")).strip()[:100]
+    shipping_term = str(payload.get("shipping_term", "Excluded")).strip()[:100]
+    tax_term = str(payload.get("tax_term", "Excluded")).strip()[:100]
+    insurance_term = str(payload.get("insurance_term", "Buyer")).strip()[:100]
+    cost_breakdown, included_charges = calculate_cost_breakdown(incoterm, {
+        "origin_charges": origin_charges, "shipping": shipping, "insurance_amount": insurance_amount,
+        "destination_charges": destination_charges, "duties": duties, "other_fees": other_fees,
+        "tax_amount": tax_amount,
+    }, shipping_term, insurance_term, tax_term)
     quote_date = str(payload.get("quote_date", "")).strip() or date.today().isoformat()
     try:
         date.fromisoformat(quote_date)
@@ -100,15 +149,19 @@ def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
         "exchange_date": str(payload.get("exchange_date", "")).strip()[:30],
         "origin_port": str(payload.get("origin_port", "")).strip()[:150],
         "destination_port": str(payload.get("destination_port", "")).strip()[:150],
-        "insurance_term": str(payload.get("insurance_term", "Buyer")).strip()[:100],
+        "insurance_term": insurance_term,
+        "insurance_amount": str(insurance_amount),
+        "origin_charges": str(origin_charges),
+        "destination_charges": str(destination_charges),
+        "duties": str(duties),
         "document_type": "pi" if str(payload.get("document_type", "quote")).lower() == "pi" else "quote",
         "language": "en" if str(payload.get("language", "zh")).lower() == "en" else "zh",
         "template_name": str(payload.get("template_name", "")).strip()[:150],
-        "incoterm": str(payload.get("incoterm", "")).strip()[:100],
+        "incoterm": incoterm,
         "payment_terms": str(payload.get("payment_terms", "")).strip()[:500],
         "payment_note": str(payload.get("payment_note", "")).strip()[:500],
-        "shipping_term": str(payload.get("shipping_term", "Excluded")).strip()[:100],
-        "tax_term": str(payload.get("tax_term", "Excluded")).strip()[:100],
+        "shipping_term": shipping_term,
+        "tax_term": tax_term,
         "tax_amount": str(tax_amount),
         "tax_note": str(payload.get("tax_note", "")).strip()[:300],
         "delivery_time": str(payload.get("delivery_time", "")).strip()[:200],
@@ -122,7 +175,8 @@ def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
         "shipping": str(shipping),
         "other_fees": str(other_fees),
         "subtotal": str(subtotal.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)),
-        "total": str((subtotal + shipping + other_fees + tax_amount).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)),
+        "cost_breakdown": cost_breakdown,
+        "total": str((subtotal + included_charges).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)),
         "items": normalized_items,
     }
     return data
@@ -254,7 +308,9 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
             "insurance_term": data.get("insurance_term", ""),
             "delivery_time": data.get("delivery_time", ""), "bank_details": data.get("bank_details", ""),
             "company_contact": data.get("company_contact", ""), "subtotal": data["subtotal"],
-            "shipping": data["shipping"], "other_fees": data["other_fees"], "total": data["total"],
+            "shipping": data["shipping"], "origin_charges": data.get("origin_charges", "0"),
+            "insurance_amount": data.get("insurance_amount", "0"), "destination_charges": data.get("destination_charges", "0"),
+            "duties": data.get("duties", "0"), "other_fees": data["other_fees"], "total": data["total"],
             "tax_amount": data.get("tax_amount", "0"),
             "items": items_text, "notes": data.get("notes", ""), "document_title": title_text,
         }
@@ -321,14 +377,29 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
         ("RIGHTPADDING",(0,0),(-1,-1),5),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),
     ]))
     story.extend([table, Spacer(1, 5*mm)])
-    summary = [
-        [Paragraph(word("商品小计", "Subtotal"), body), Paragraph(f"{safe(data['currency'])} {safe(data['subtotal'])}", right)],
-        [Paragraph(word("运费", "Shipping"), body), Paragraph(f"{safe(data['currency'])} {safe(data['shipping'])}", right)],
-        [Paragraph(word("其他费用", "Other Charges"), body), Paragraph(f"{safe(data['currency'])} {safe(data['other_fees'])}", right)],
-        [Paragraph(word("税额", "Tax"), body), Paragraph(f"{safe(data['currency'])} {safe(data.get('tax_amount', '0'))}", right)],
-        [Paragraph(word("总计", "Total"), ParagraphStyle("TotalLabel", parent=body, fontSize=11)), Paragraph(f"{safe(data['currency'])} {safe(data['total'])}", ParagraphStyle("Total", parent=right, fontSize=12, textColor=colors.HexColor("#17765d")))],
+    summary = [[Paragraph(word("商品小计", "Subtotal"), body), Paragraph(f"{safe(data['currency'])} {safe(data['subtotal'])}", right)]]
+    cost_items = data.get("cost_breakdown") or [
+        {"key": key, "label_zh": zh, "label_en": en, "amount": data.get(key, "0"), "included": included}
+        for key, zh, en, included in [
+            ("origin_charges", "起运地费用", "Origin charges", data.get("incoterm") in {"FCA", "FAS", "FOB", "CFR", "CPT", "CIF", "CIP", "DAP", "DPU", "DDP"}),
+            ("shipping", "运费", "Freight", data.get("shipping_term") == "Included" or data.get("incoterm") in {"CFR", "CPT", "CIF", "CIP", "DAP", "DPU", "DDP"}),
+            ("insurance_amount", "保险费", "Insurance", data.get("insurance_term") in {"Seller", "Included"} or data.get("incoterm") in {"CIF", "CIP"}),
+            ("destination_charges", "目的地费用", "Destination charges", data.get("incoterm") in {"DAP", "DPU", "DDP"}),
+            ("duties", "关税", "Duties", data.get("incoterm") == "DDP"),
+            ("other_fees", "其他费用", "Other charges", True),
+            ("tax_amount", "税额", "Tax", data.get("tax_term") == "Included"),
+        ]
     ]
-    story.append(Table(summary, colWidths=[140*mm, 38*mm], hAlign="RIGHT", style=TableStyle([("ALIGN",(1,0),(1,-1),"RIGHT"),("LINEABOVE",(0,4),(-1,4),0.8,colors.HexColor("#9db7a4")),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)])))
+    for item in cost_items:
+        amount = Decimal(str(item.get("amount", "0") or "0"))
+        if amount == 0 and item.get("key") != "other_fees":
+            continue
+        included_label = word("计入总额", "Included in total") if item.get("included") else word("不计入总额", "Excluded from total")
+        label = item.get("label_en") if data.get("language") == "en" else item.get("label_zh")
+        summary.append([Paragraph(f"{safe(label)} · {included_label}", small), Paragraph(f"{safe(data['currency'])} {safe(str(amount))}", right)])
+    total_index = len(summary)
+    summary.append([Paragraph(word("总计", "Total"), ParagraphStyle("TotalLabel", parent=body, fontSize=11)), Paragraph(f"{safe(data['currency'])} {safe(data['total'])}", ParagraphStyle("Total", parent=right, fontSize=12, textColor=colors.HexColor("#17765d")))])
+    story.append(Table(summary, colWidths=[140*mm, 38*mm], hAlign="RIGHT", style=TableStyle([("ALIGN",(1,0),(1,-1),"RIGHT"),("LINEABOVE",(0,total_index),(-1,total_index),0.8,colors.HexColor("#9db7a4")),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)])))
     terms = [(word("贸易条款", "Trade Terms"), " / ".join(x for x in [data.get("incoterm", ""), data.get("origin_port", ""), data.get("destination_port", "")] if x)), (word("付款条款", "Payment Terms"), " / ".join(x for x in [data.get("payment_terms", ""), data.get("payment_note", "")] if x)), (word("运费", "Shipping"), f"{data.get('shipping_term','')}; {data.get('currency')} {data.get('shipping','0')}"), (word("保险", "Insurance"), data.get("insurance_term")), (word("税费", "Tax Terms"), " / ".join(x for x in [data.get("tax_term", ""), data.get("tax_note", ""), f"{data.get('currency')} {data.get('tax_amount','0')}"] if x)), (word("汇率基准", "Exchange Rate Basis"), f"{data.get('exchange_rate','')} / {data.get('exchange_date','')}" if data.get("exchange_rate") else ""), (word("交付时间", "Delivery Time"), data.get("delivery_time")), (word("收款信息", "Bank Details"), data.get("bank_details")), (word("备注", "Notes"), data.get("notes"))]
     for label, value in terms:
         if value:

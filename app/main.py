@@ -21,7 +21,7 @@ load_dotenv()
 import imagehash
 from docx import Document
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from openpyxl import load_workbook
@@ -29,7 +29,17 @@ from PIL import Image
 from pptx import Presentation
 from pypdf import PdfReader
 import httpx
+from sqlalchemy import text
 from .quotes import list_quotes, normalize_quote, pdf_response
+from .business import (
+    WORKSPACES, audit as business_audit, calculate_commission, compute_freight,
+    delete_record as delete_business_record, engine as business_engine,
+    get_record as get_business_record, import_customer_rows, import_freight_rows, init_business_store,
+    list_conversations as list_business_conversations, list_records as list_business_records,
+    list_rules as list_team_rules, load_conversation as load_business_conversation,
+    save_conversation as save_business_conversation, save_record as save_business_record,
+    save_rule as save_team_rule,
+)
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
@@ -328,6 +338,7 @@ def file_record(file_id: int) -> sqlite3.Row:
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    init_business_store()
 
 
 async def periodic_sync() -> None:
@@ -503,6 +514,204 @@ async def quote_customers_put(payload: dict[str, Any]) -> dict[str, Any]:
     customers.append(customer)
     path.write_text(json.dumps(customers[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
     return {"customer": customer, "customers": customers[-500:]}
+
+
+@app.get("/api/workspaces")
+def workspaces_get() -> dict[str, Any]:
+    return {"workspaces": [{"id": key, "name": name} for key, name in WORKSPACES.items()]}
+
+
+@app.get("/api/conversations")
+def conversations_get(workspace: str = "", limit: int = 100) -> dict[str, Any]:
+    return {"conversations": list_business_conversations(workspace, limit)}
+
+
+@app.get("/api/conversations/{conversation_id}")
+def conversation_get(conversation_id: str) -> dict[str, Any]:
+    conversation = load_business_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(404, "找不到这段对话")
+    return {"conversation": conversation}
+
+
+@app.post("/api/conversations")
+def conversation_save(payload: dict[str, Any], x_actor: str = Header(default="")) -> dict[str, Any]:
+    try:
+        conversation = save_business_conversation(str(payload.get("id", "")), str(payload.get("workspace", "product")), payload.get("messages", []), x_actor)
+        return {"conversation": conversation}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/team/rules")
+def team_rules_get(workspace: str = "") -> dict[str, Any]:
+    return {"rules": list_team_rules(workspace)}
+
+
+@app.post("/api/team/rules")
+def team_rule_create(payload: dict[str, Any], x_actor: str = Header(default="")) -> dict[str, Any]:
+    try:
+        rule = save_team_rule(str(payload.get("workspace", "all")), str(payload.get("name", "")), str(payload.get("body", "")), actor=x_actor)
+        return {"rule": rule}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.put("/api/team/rules/{rule_id}")
+def team_rule_update(rule_id: str, payload: dict[str, Any], x_actor: str = Header(default="")) -> dict[str, Any]:
+    try:
+        rule = save_team_rule(str(payload.get("workspace", "all")), str(payload.get("name", "")), str(payload.get("body", "")), rule_id, x_actor)
+        return {"rule": rule}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.delete("/api/team/rules/{rule_id}")
+def team_rule_delete(rule_id: str, x_actor: str = Header(default="")) -> dict[str, Any]:
+    with business_engine.begin() as c:
+        result = c.execute(text("UPDATE team_rules SET active=0 WHERE id=:id AND active=1"), {"id": rule_id})
+    if result.rowcount:
+        business_audit(x_actor, "deactivate", "rule", rule_id, {})
+    return {"deleted": bool(result.rowcount)}
+
+
+@app.get("/api/business/records/{kind}")
+def business_records_get(kind: str, q: str = "", limit: int = 100) -> dict[str, Any]:
+    if kind not in {"customer", "freight_rate", "salesperson", "order", "commission_rule", "payroll", "product_note"}:
+        raise HTTPException(404, "未知业务资料类型")
+    return {"records": list_business_records(kind, q, limit)}
+
+
+@app.post("/api/business/records/{kind}")
+def business_record_create(kind: str, payload: dict[str, Any], x_actor: str = Header(default="")) -> dict[str, Any]:
+    try:
+        record = save_business_record(kind, payload, x_actor)
+        return {"record": record}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.put("/api/business/records/{kind}/{record_id}")
+def business_record_update(kind: str, record_id: str, payload: dict[str, Any], x_actor: str = Header(default="")) -> dict[str, Any]:
+    if kind not in {"customer", "freight_rate", "salesperson", "order", "commission_rule", "payroll", "product_note"}:
+        raise HTTPException(404, "未知业务资料类型")
+    existing = get_business_record(record_id)
+    if not existing or existing["kind"] != kind:
+        raise HTTPException(404, "找不到对应业务记录")
+    try:
+        return {"record": save_business_record(kind, {**payload, "id": record_id}, x_actor)}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.delete("/api/business/records/{record_id}")
+def business_record_delete(record_id: str, x_actor: str = Header(default="")) -> dict[str, Any]:
+    return {"deleted": delete_business_record(record_id, x_actor)}
+
+
+@app.post("/api/business/freight/import")
+async def freight_import(file: UploadFile = File(...), x_actor: str = Header(default="")) -> dict[str, Any]:
+    content = await file.read(MAX_UPLOAD + 1)
+    if len(content) > MAX_UPLOAD:
+        raise HTTPException(413, f"文件超过 {MAX_UPLOAD // 1024 // 1024} MB")
+    folder = LIBRARY_DIR / "运费资料"
+    folder.mkdir(parents=True, exist_ok=True)
+    destination = folder / (Path(file.filename or "运费表.csv").name[:180])
+    destination.write_bytes(content)
+    relative_path = destination.relative_to(LIBRARY_DIR).as_posix()
+    index_result = index_one(destination, relative_path)
+    try:
+        rates = import_freight_rows(relative_path, content, x_actor)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if not rates:
+        raise HTTPException(422, "没有识别到运费行。表格需包含运价、计价单位等列；原文件仍可上传到资料库后让 AI 检索。")
+    return {"imported": len(rates), "rates": rates, "source_file": relative_path, "file_status": index_result["status"]}
+
+
+@app.post("/api/business/customers/import")
+async def customer_import(file: UploadFile = File(...), x_actor: str = Header(default="")) -> dict[str, Any]:
+    content = await file.read(MAX_UPLOAD + 1)
+    if len(content) > MAX_UPLOAD:
+        raise HTTPException(413, f"文件超过 {MAX_UPLOAD // 1024 // 1024} MB")
+    folder = LIBRARY_DIR / "客户资料"
+    folder.mkdir(parents=True, exist_ok=True)
+    destination = folder / Path(file.filename or "客户表.csv").name[:180]
+    destination.write_bytes(content)
+    relative_path = destination.relative_to(LIBRARY_DIR).as_posix()
+    index_one(destination, relative_path)
+    try:
+        customers = import_customer_rows(relative_path, content, x_actor)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if not customers:
+        raise HTTPException(422, "没有识别到客户行。表格需要客户名称/公司名称列；原文件已保存并建立索引。")
+    return {"imported": len(customers), "customers": customers, "source_file": relative_path}
+
+
+@app.post("/api/business/freight/calculate")
+def freight_calculate(payload: dict[str, Any]) -> dict[str, Any]:
+    rate_id = str(payload.get("rate_id", ""))
+    rate_record = get_business_record(rate_id) if rate_id else None
+    if not rate_id:
+        raise HTTPException(422, "请先选择资料库中已导入的运费率，避免使用 AI 猜测运价")
+    if not rate_record or rate_record["kind"] != "freight_rate":
+        raise HTTPException(404, "找不到所选运费率")
+    try:
+        calculation = compute_freight(payload, rate_record["data"] if rate_record else None)
+        return {"calculation": calculation}
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/business/payroll/calculate")
+def payroll_calculate(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return {"calculation": calculate_commission(str(payload.get("seller_id", "")), str(payload.get("start_date", "")), str(payload.get("end_date", "")))}
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/business/payroll/drafts")
+def payroll_draft_create(payload: dict[str, Any], x_actor: str = Header(default="")) -> dict[str, Any]:
+    try:
+        calculation = calculate_commission(str(payload.get("seller_id", "")), str(payload.get("start_date", "")), str(payload.get("end_date", "")))
+        calculation["name"] = f"{calculation['seller_name']} {calculation['period_start']} 至 {calculation['period_end']} 工资草稿"
+        record = save_business_record("payroll", calculation, x_actor)
+        return {"record": record}
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/business/payroll/{record_id}/approve")
+def payroll_approve(record_id: str, x_actor: str = Header(default="")) -> dict[str, Any]:
+    record = get_business_record(record_id)
+    if not record or record["kind"] != "payroll":
+        raise HTTPException(404, "找不到工资草稿")
+    data = {**record["data"], "status": "approved", "approved_at": datetime.now(timezone.utc).isoformat(), "approved_by": x_actor}
+    return {"record": save_business_record("payroll", {**data, "id": record_id}, x_actor)}
+
+
+@app.get("/api/business/payroll/{record_id}/csv")
+def payroll_csv(record_id: str) -> Response:
+    record = get_business_record(record_id)
+    if not record or record["kind"] != "payroll":
+        raise HTTPException(404, "找不到工资明细")
+    data = record["data"]
+    import csv
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["销售人员", data.get("seller_name", ""), "期间", f"{data.get('period_start', '')} ~ {data.get('period_end', '')}"])
+    writer.writerow(["提成口径", data.get("basis", ""), "提成比例(%)", data.get("rate_percent", "")])
+    writer.writerow(["订单号", "日期", "币种", "计提基数", "提成金额"])
+    for order in data.get("orders", []):
+        writer.writerow([order.get("order_no", ""), order.get("date", ""), order.get("currency", ""), order.get("basis_amount", ""), order.get("commission", "")])
+    writer.writerow(["币种汇总", "计提基数", "提成总额"])
+    for currency, totals in data.get("currency_totals", {}).items():
+        writer.writerow([currency, totals.get("basis_amount", ""), totals.get("commission", "")])
+    output.seek(0)
+    filename = f"payroll-{record_id[:12]}.csv"
+    return Response(content="\ufeff" + output.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @app.post("/api/quotes/from-chat")
@@ -814,7 +1023,7 @@ def sync() -> dict[str, Any]:
 
 
 @app.post("/api/files/upload")
-async def upload_files(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+async def upload_files(files: list[UploadFile] = File(...), folder: str = Form(default="")) -> dict[str, Any]:
     """Store user-uploaded materials under the configured library, then index them."""
     LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
     saved = []
@@ -829,7 +1038,10 @@ async def upload_files(files: list[UploadFile] = File(...)) -> dict[str, Any]:
         total_bytes += len(content)
         if len(content) > MAX_UPLOAD or total_bytes > MAX_UPLOAD * 4:
             raise HTTPException(413, "Upload limit exceeded")
-        dest = LIBRARY_DIR / safe_name
+        parts = [part.strip() for part in folder.replace("\\", "/").split("/") if part.strip() not in {"", "."}]
+        if any(part == ".." for part in parts):
+            raise HTTPException(400, "Invalid folder")
+        dest = LIBRARY_DIR.joinpath(*parts, safe_name)
         if not dest.resolve().is_relative_to(LIBRARY_DIR):
             raise HTTPException(400, "Invalid filename")
         if dest.exists():
@@ -954,9 +1166,12 @@ async def assistant_chat(
     image: UploadFile | None = File(default=None),
     history: str = Form(default="[]"),
     model_id: str = Form(default="local"),
+    workspace: str = Form(default="product"),
     image_threshold: float = Form(default=0.20),
 ) -> dict[str, Any]:
-    """Chat over local product documents, optionally grounded by a submitted image."""
+    """Chat over a module-specific team assistant grounded in indexed records."""
+    if workspace not in WORKSPACES:
+        workspace = "product"
     question = message.strip()[:3000]
     raw_image: bytes | None = None
     query_image: Image.Image | None = None
@@ -975,6 +1190,18 @@ async def assistant_chat(
 
     text_results = text_search(q=question, limit=8)["results"] if question else []
     related_results = related_text_for_images(image_results) if image_results else []
+    module_record_kinds = {
+        "product": ["product_note"], "freight": ["freight_rate"], "quote": ["customer", "freight_rate"],
+        "pi": ["customer", "order"], "customer": ["customer", "order"],
+        "sales": ["salesperson", "order"], "payroll": ["salesperson", "order", "commission_rule", "payroll"],
+        "rules": [],
+    }
+    business_context = []
+    for kind in module_record_kinds.get(workspace, []):
+        for record in list_business_records(kind, limit=40):
+            business_context.append(f"[{kind}] id={record['id']} {record['name']}: {json.dumps(record['data'], ensure_ascii=False, default=str)[:900]}")
+    shared_rules = list_team_rules(workspace) + list_team_rules("all")
+    rule_context = "\n".join(f"- [{rule['name']} v{rule['version']}] {rule['body']}" for rule in shared_rules)
     sources: list[dict[str, Any]] = []
     seen_sources: set[tuple[int, int | None]] = set()
     for source in [*text_results, *related_results]:
@@ -995,16 +1222,32 @@ async def assistant_chat(
         raise HTTPException(400, "所选模型尚未保存 API Key，请到模型管理中配置后再使用。")
     model = cfg["model"]
     answer_text = ""
+    proposed_action = None
     if configured:
         context_items = [f"[资料 {i+1}] 文件：{x['path']}；页码：{x.get('page') or '未标注'}\n{x['snippet']}" for i, x in enumerate(sources)]
         context_items.extend(f"[相似图片 {i+1}] 文件：{x['path']}；视觉相似度：{x.get('similarity', 0):.3f}" for i, x in enumerate(image_results[:8]))
+        context_items.extend(business_context[:40])
+        if rule_context:
+            context_items.append("[团队共享规则]\n" + rule_context[:10000])
         context = "\n\n".join(context_items) or "本地资料库没有找到可引用的文字资料。"
-        prompt = f"当前问题：{question or '请识别图片并在产品资料库中查找相关信息。'}\n\n本地检索结果（只能把这些作为产品事实依据）：\n{context}\n\n请用中文直接回答。对检索不到的参数或价格明确说资料不足，不要猜测；在结尾列出引用文件名。可以描述你从图片看到的内容，但要区分视觉观察和资料库确认的信息。"
+        module_instruction = {
+            "product": "你负责产品图片和产品资料查询。优先返回型号、规格、价格和可追溯来源。",
+            "freight": "你负责运费及贸易条款。只根据已上传费率和明确输入解释或计算；缺少路线、计价单位、箱规、重量或生效日期时指出具体缺项，不要猜运价。",
+            "quote": "你负责报价。可以指导并整理产品、客户、运费和贸易条款；总金额必须按系统字段和规则计算，资料缺失时标注待确认。",
+            "pi": "你负责 PI 形式发票。优先复用已确认报价，不自行修改产品价格、付款和交期条款。",
+            "customer": "你负责客户档案查询与维护建议。只把已提供的客户记录当作事实。",
+            "sales": "你负责销售人员与订单归属查询。",
+            "payroll": "你负责业绩和提成核算说明。必须区分回款、销售额和毛利口径；未知数据不能补造，计算结果先作为待复核草稿。",
+            "rules": "你负责团队规则整理。把用户提出的规则改动整理成明确、可审核的文字；不得声称规则已经发布，除非用户已在规则维护窗口发布。",
+        }.get(workspace, "")
+        prompt = f"当前助手窗口：{WORKSPACES[workspace]}。{module_instruction}\n当前问题：{question or '请识别图片并在产品资料库中查找相关信息。'}\n\n本地资料与业务记录（只能把这些作为事实依据）：\n{context}\n\n请用中文直接回答。对检索不到的参数或价格明确说资料不足，不要猜测；在结尾列出引用文件名或记录类型。可以描述你从图片看到的内容，但要区分视觉观察和资料库确认的信息。"
         try:
             history_items = json.loads(history)
         except (json.JSONDecodeError, TypeError):
             history_items = []
-        messages: list[dict[str, Any]] = [{"role": "system", "content": "你是产品资料助手。回答优先依据检索到的用户资料；不要编造型号、参数、价格、库存、运费或合同条款。资料不足时明确说明。用户上传的图片可用于识别和检索，但不能凭外观确认未展示的具体参数。"}]
+        system_instruction = "你是团队业务 AI 助手。回答优先依据检索到的团队资料和已发布规则；不要编造型号、参数、价格、库存、运费、回款或合同条款。资料不足时明确说缺少什么。图片只能支持外观观察和相似图检索。"
+        system_instruction += '\n当用户明确要求新增、修改、删除客户/销售/运费率/订单/提成规则、计算运费、生成工资草稿或生成报价/PI 草稿，且必填数据充分时，在回答末尾另附一个动作块：[[ACTION_JSON]]{"type":"customer.save","data":{...}}[[/ACTION_JSON]]。动作类型只允许 customer.save/customer.delete/freight_rate.save/freight.calculate/salesperson.save/salesperson.delete/order.save/commission_rule.save/payroll.calculate/rule.save/quote.draft/pi.draft。报价/PI 的产品名称、数量、币种与价格必须来自当前资料库引用或用户明确输入；缺少价格、客户或数量时先简短追问，不输出动作块。运费动作必须使用系统已导入的 rate_id，不能猜测价格。删除动作必须有已存在的 id。动作只在用户点击确认后执行，并且生成的是可编辑草稿。'
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system_instruction}]
         if isinstance(history_items, list):
             for item in history_items[-8:]:
                 if isinstance(item, dict) and item.get("role") in {"user", "assistant"}:
@@ -1027,6 +1270,16 @@ async def assistant_chat(
                 response = await client.post(f"{cfg['base_url'].rstrip('/')}/chat/completions", headers=headers, json={"model": model, "temperature": 0.1, "messages": messages})
                 response.raise_for_status()
                 answer_text = response.json()["choices"][0]["message"]["content"]
+                action_match = re.search(r"\[\[ACTION_JSON\]\]\s*(\{.*?\})\s*\[\[/ACTION_JSON\]\]", answer_text, re.S)
+                if action_match:
+                    try:
+                        candidate = json.loads(action_match.group(1))
+                        allowed_actions = {"customer.save", "customer.delete", "freight_rate.save", "freight.calculate", "salesperson.save", "salesperson.delete", "order.save", "commission_rule.save", "payroll.calculate", "rule.save", "quote.draft", "pi.draft"}
+                        if isinstance(candidate, dict) and candidate.get("type") in allowed_actions and isinstance(candidate.get("data"), dict):
+                            proposed_action = {"type": candidate["type"], "data": candidate["data"]}
+                            answer_text = (answer_text[:action_match.start()] + answer_text[action_match.end():]).strip()
+                    except (ValueError, TypeError):
+                        pass
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
                 raise HTTPException(401, "模型服务认证失败。请检查这条模型配置中的 API Key。")
@@ -1042,7 +1295,90 @@ async def assistant_chat(
     else:
         answer_text = "我暂时没有在已索引资料里找到相关内容。可以试试产品型号、文件名里的关键词，或上传产品图片查找相似图片。"
 
-    return {"answer": answer_text, "sources": sources, "image_matches": image_results, "image_method": image_method, "model": model if configured else None, "used_ai": configured}
+    return {"answer": answer_text, "sources": sources, "image_matches": image_results, "image_method": image_method, "proposed_action": proposed_action, "model": model if configured else None, "used_ai": configured}
+
+
+@app.post("/api/assistant/execute")
+def assistant_execute(payload: dict[str, Any], x_actor: str = Header(default="")) -> dict[str, Any]:
+    workspace = str(payload.get("workspace", "product"))
+    action = str(payload.get("type", ""))
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise HTTPException(422, "AI 动作数据格式无效")
+    allowed_by_workspace = {
+        "customer": {"customer.save", "customer.delete"},
+        "freight": {"freight_rate.save", "freight.calculate"},
+        "sales": {"salesperson.save", "salesperson.delete", "order.save"},
+        "payroll": {"commission_rule.save", "payroll.calculate"},
+        "rules": {"rule.save"},
+        "quote": {"quote.draft"}, "pi": {"pi.draft"},
+    }
+    if action not in allowed_by_workspace.get(workspace, set()):
+        raise HTTPException(403, "该 AI 窗口没有执行此类操作的权限")
+    try:
+        if action.endswith(".delete"):
+            record_id = str(data.get("id", ""))
+            record = get_business_record(record_id) if record_id else None
+            expected_kind = action.split(".", 1)[0]
+            if not record or record["kind"] != expected_kind or not delete_business_record(record_id, x_actor):
+                raise HTTPException(404, "找不到要删除的记录")
+            return {"result": {"message": "记录已删除。"}}
+        if action.endswith(".save") and action != "rule.save":
+            kind = action.split(".", 1)[0]
+            if kind == "freight_rate":
+                unit = str(data.get("rate_unit", "cbm")).lower()
+                if unit not in {"kg", "cbm", "carton", "shipment"}:
+                    raise HTTPException(422, "计价单位请使用 kg、cbm、carton 或 shipment")
+                data["rate"] = float(data.get("rate", 0))
+                if data["rate"] <= 0:
+                    raise HTTPException(422, "运费单价必须大于 0")
+                if not data.get("origin") or not data.get("destination"):
+                    raise HTTPException(422, "运费规则需要起运地和目的地")
+            if kind == "salesperson" and not str(data.get("name", "")).strip():
+                raise HTTPException(422, "销售人员姓名不能为空")
+            if kind == "order" and not str(data.get("order_no", data.get("name", ""))).strip():
+                raise HTTPException(422, "订单号不能为空")
+            if kind == "order":
+                if not get_business_record(str(data.get("seller_id", ""))):
+                    raise HTTPException(422, "请关联一位已登记的销售人员")
+                try:
+                    date.fromisoformat(str(data.get("date", "")))
+                except ValueError as exc:
+                    raise HTTPException(422, "订单日期请使用 YYYY-MM-DD") from exc
+            if kind == "commission_rule":
+                if data.get("basis", "collected") not in {"collected", "net_sales", "gross_profit"}:
+                    raise HTTPException(422, "提成口径无效")
+                rate_percent = float(data.get("rate_percent", 0) or 0)
+                if not 0 <= rate_percent <= 100:
+                    raise HTTPException(422, "提成比例必须在 0 到 100 之间")
+            return {"result": {"message": "记录已保存。", "record": save_business_record(kind, data, x_actor)}}
+        if action == "freight.calculate":
+            rate_id = str(data.get("rate_id", ""))
+            rate_record = get_business_record(rate_id) if rate_id else None
+            if not rate_id:
+                raise HTTPException(422, "请先选择已导入的运费率；系统不会让 AI 猜测运价")
+            if not rate_record or rate_record["kind"] != "freight_rate":
+                raise HTTPException(404, "运费率记录不存在")
+            return {"result": {"calculation": compute_freight(data, rate_record["data"] if rate_record else None)}}
+        if action == "payroll.calculate":
+            result = calculate_commission(str(data.get("seller_id", "")), str(data.get("start_date", "")), str(data.get("end_date", "")))
+            result["name"] = f"{result['seller_name']} {result['period_start']} 至 {result['period_end']} 工资草稿"
+            return {"result": {"calculation": result, "draft": save_business_record("payroll", result, x_actor)}}
+        if action in {"quote.draft", "pi.draft"}:
+            data["document_type"] = "pi" if action == "pi.draft" else "quote"
+            normalized = normalize_quote(data)
+            quote_id = str(uuid.uuid4())
+            quote_no = f"{'PI' if action == 'pi.draft' else 'QT'}{date.today().strftime('%Y%m%d')}-{quote_id[:8].upper()}"
+            now = datetime.now(timezone.utc).isoformat()
+            with db() as c:
+                c.execute("INSERT INTO quotes(id,quote_no,customer,currency,status,data,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (quote_id, quote_no, normalized["customer"], normalized["currency"], "draft", json.dumps(normalized, ensure_ascii=False), now, now))
+            return {"result": {"message": "单据草稿已建立，可打开后编辑确认，再生成 PDF。", "quote_draft": {"id": quote_id, "quote_no": quote_no, "status": "draft", "data": normalized}}}
+        if action == "rule.save":
+            rule = save_team_rule(str(data.get("workspace", "all")), str(data.get("name", "")), str(data.get("body", "")), actor=x_actor)
+            return {"result": {"message": f"共享规则已发布 v{rule['version']}。", "rule": rule}}
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    raise HTTPException(422, "暂不支持此 AI 操作")
 
 
 @app.post("/api/search/image")

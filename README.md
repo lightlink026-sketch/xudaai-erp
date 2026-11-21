@@ -67,6 +67,35 @@ DOCX 模板可放在 `data/templates/`，也可从 AI 对话中的报价/PI 单�
 
 公司资料可按 `LIBRARY_DIR/公司资料/<公司名称>/` 放置 DOCX、PDF、TXT 或 CSV 文件。报价窗口会自动扫描并识别公司名称、地址、电话和邮箱；多家公司会出现在“选择公司资料”下拉框中，单家公司会自动载入。
 
+报价与 PI 助手也支持在聊天中提出“按这些产品生成报价/PI”。资料库引用里已有的型号、数量和价格会写入可编辑草稿；信息不齐时先由 AI 询问。用户点击“确认并执行”后草稿进入单据编辑器，复核客户、币种和贸易条款后再生成 PDF。费用明细分为起运地、国际运费、保险、目的地费用、关税、其他费用和税额。EXW/FCA/FAS/FOB/CFR/CPT/CIF/CIP/DAP/DPU/DDP 按卖方承担范围计算总额；自定义条款需手动选择含运费/保险/税费。PDF 会列出每个费用是否计入报价总额。此计算是报价工作流的费用分摊，不代替对具体 Incoterms 合同义务的审核。
+
+## AI 工作台、团队资料与业务动作
+
+顶部的助手窗口按产品、运费与贸易、报价、PI、客户、销售、业绩与薪酬、团队规则分区。每个窗口保存共享聊天记录；AI 可以依据当前模块、已录入业务记录和生效的团队规则回答。支持在聊天里确认后执行客户/销售/运费率/订单/提成规则的增改删、计算运费、生成工资草稿及报价/PI 草稿。运费计算只接受已导入的运费率，不允许 AI 自行估价；工资核算按订单、回款/销售额/毛利口径及有效提成规则生成待复核草稿，并可下载 CSV 明细。上传的客户表和运费表会保留原文件并写入结构化记录，后续仍可用 AI 查询、修订。
+
+本机使用时，结构化业务数据和团队规则写入 `data/business.sqlite3`，文档索引/报价单仍使用 `data/library.sqlite3`。单机先用 SQLite 即可。若需要多用户共享，推荐 NAS 上只运行一个应用实例、所有成员访问同一实例，并启用 Postgres 存放共享的业务记录、规则和对话；原始文件、索引和报价/PI PDF 仍需放在同一个共享持久化数据/资料目录。SQLite 数据目录不应由多个应用副本并发写入。
+
+可选 Postgres Compose 示例（请先修改 `.env` 中的口令并配置 `DATABASE_URL`）：
+
+```dotenv
+DATABASE_URL=postgresql+psycopg://xudaai:替换为强密码@postgres:5432/xudaai
+POSTGRES_PASSWORD=替换为同一强密码
+```
+
+```powershell
+docker compose --profile team up -d --build
+```
+
+从 Windows 本机切换 NAS 时，先停掉本机服务，将整个 `data/` 和资料目录复制到 NAS 对应挂载目录；再启动 NAS 服务。应用启动后，在 NAS 项目目录把本机业务数据库迁入 Postgres（命令会把 `data/business.sqlite3` 复制到 Postgres，不会删除源文件）：
+
+```powershell
+docker compose --profile team exec -e SOURCE_DATABASE_URL=sqlite:////srv/app/data/business.sqlite3 xudaai-library python scripts/migrate_business_db.py
+```
+
+报价/PI 历史、文档索引和模型设置仍在 `data/` 中的 SQLite/JSON 文件里，因此需要完整复制 `data/`，不能只迁移 Postgres。执行迁移后抽查客户、销售、订单、规则和共享聊天记录；迁移时不要让旧电脑继续写本地业务库。
+
+APP_PASSWORD 是当前整站的共享 HTTP Basic 密码，适合先在可信局域网内试用；当前没有按团队成员拆分的账号/角色权限，薪酬数据因此对拥有该密码的全体用户可见。部署到公网前应加 VPN/反向代理身份认证与 HTTPS；不要把单一共享密码当作薪酬隔离方案。钉钉仍可保留为后续入口，当前模块 API 与网页助手共用同一业务服务和存储。
+
 Windows 本机 PDF 使用微软雅黑；Docker 镜像安装 Noto CJK 字体。若需要自定义字体，可设置 `QUOTE_FONT_PATH` 指向可用的中文 TrueType Collection 字体。产品价格从已索引的关联报价资料中自动匹配，无法确认的价格会标记核对；运费仍由用户填写。公司抬头和联系信息可填写并保存为默认值。
 
 ## API 示例
@@ -89,6 +118,7 @@ curl.exe -X POST http://127.0.0.1:8000/api/index/sync
 - 文本检索使用 SQLite FTS；中文查询支持相邻字符回退检索。模型回答基于命中片段并返回来源。ChatGPT Plus/Pro 订阅不能代替模型 API Key；可在模型设置页接 DeepSeek 等兼容 API，或接本地 Ollama。
 - OpenCLIP 语义图搜需 `ENABLE_CLIP=1`，首次索引会下载模型。视频检索以音轨转写为主，不会自动理解整段视频画面。
 - 设置 `APP_PASSWORD` 可启用浏览器/API 的 HTTP Basic 登录。未设置密码时只限可信局域网使用，不要直接暴露公网。请给 NAS 配强密码并限制访问网段。
+- Postgres 的 `team` Compose profile 仅迁移结构化业务记录、共享规则、聊天历史；文档索引及报价/PI 记录仍使用文件数据目录内的 SQLite，按“一个应用实例 + 共享持久卷”部署。需备份整个 `data/`、资料目录和 Postgres 卷。
 - 钉钉机器人通过 Stream 出站连接运行；配置应用凭据后可在内部团队使用。回传图片预览给钉钉的能力还需配置可访问的 HTTPS 文件地址。
 - ChatGPT MCP 连接需要公网 HTTPS 与单独的访问授权；当前版本集中完成浏览器和钉钉入口，MCP 远程入口需后续单独启用，不能直接把本机地址交给 ChatGPT 云端访问。
 

@@ -1,9 +1,22 @@
 const $ = (selector) => document.querySelector(selector);
 let chatHistory = [];
+let currentWorkspace = localStorage.getItem('xudaai-workspace') || 'product';
+let currentConversationId = '';
 let selectedChatImage = null;
 let modelHasSavedKey = false;
 const quoteCandidates = new Map();
 const selectedQuoteProducts = new Map();
+const pendingActions = new Map();
+const workspaceInfo = {
+  product: ['产品资料助手', '查产品、图片、规格和价格；答案附资料来源。', '输入产品型号、问题，或上传产品图片'],
+  freight: ['运费与贸易助手', '上传并维护运费表；按重量、体积、目的地和贸易条款计算费用明细。', '描述运输路线、箱数、体积、重量或运费问题'],
+  quote: ['报价助手', '从产品资料和客户信息建立报价；核对费用明细后生成 PDF。', '例如：把刚才选的产品做英文 USD 报价'],
+  pi: ['PI 合同助手', '查询历史 PI，或从报价单生成 PI，并核对付款和交付条款。', '例如：根据最近的报价生成 PI'],
+  customer: ['客户助手', '查询和维护客户资料，查看客户报价、PI 和订单记录。', '例如：查找某客户资料，或更新联系人'],
+  sales: ['销售助手', '维护销售人员和订单归属，查询团队销售记录。', '例如：新增销售人员或查询本月订单'],
+  payroll: ['业绩与薪酬助手', '按已配置的提成规则和实际回款计算业绩，生成待复核工资明细。', '例如：计算某销售 2026-11 月提成'],
+  rules: ['团队规则助手', '管理团队共享规则；发布后适用到对应 AI 窗口。', '例如：记录报价必须默认使用 USD，有效期 30 天'],
+};
 
 function toast(message) {
   const el = document.createElement('div');
@@ -22,6 +35,113 @@ document.querySelectorAll('.nav').forEach((button) => {
     if (button.dataset.tab === 'manage') loadStatus();
   };
 });
+
+document.querySelectorAll('[data-workspace]').forEach((button) => button.onclick = () => setWorkspace(button.dataset.workspace));
+$('#new-conversation').onclick = () => startWorkspaceConversation();
+$('#conversation-select').onchange = async (event) => {
+  if (!event.target.value) return;
+  try {
+    const response = await fetch(`/api/conversations/${encodeURIComponent(event.target.value)}`);
+    const data = await response.json(); if (!response.ok) throw new Error(data.detail || '读取对话失败');
+    currentConversationId = data.conversation.id;
+    chatHistory = data.conversation.messages || [];
+    renderWorkspaceConversation();
+  } catch (error) { toast(error.message); }
+};
+
+function setWorkspace(workspace) {
+  if (!workspaceInfo[workspace]) return;
+  currentWorkspace = workspace; currentConversationId = ''; chatHistory = [];
+  localStorage.setItem('xudaai-workspace', workspace);
+  document.querySelectorAll('[data-workspace]').forEach((button) => button.classList.toggle('active', button.dataset.workspace === workspace));
+  const [name, description, placeholder] = workspaceInfo[workspace];
+  $('#workspace-description').textContent = description;
+  $('#chat-message').placeholder = placeholder;
+  $('#conversation-select').value = '';
+  startWorkspaceConversation(false);
+  loadWorkspaceConversations();
+  if (workspace === 'rules') loadTeamRules();
+}
+
+function startWorkspaceConversation(focus = true) {
+  currentConversationId = ''; chatHistory = [];
+  $('#conversation-select').value = '';
+  const [name, description] = workspaceInfo[currentWorkspace];
+  $('#chat-thread').innerHTML = `<div class="chat-welcome"><div class="assistant-mark">✧</div><div><b>你好，我是${esc(name)}</b><p>${esc(description)}</p></div></div>`;
+  if (focus) $('#chat-message').focus();
+}
+
+function renderWorkspaceConversation() {
+  $('#chat-thread').innerHTML = '';
+  chatHistory.forEach((message) => addMessage(message.role, message.content));
+}
+
+async function loadWorkspaceConversations() {
+  const select = $('#conversation-select');
+  try {
+    const response = await fetch(`/api/conversations?workspace=${encodeURIComponent(currentWorkspace)}&limit=100`);
+    const data = await response.json(); if (!response.ok) return;
+    select.innerHTML = '<option value="">新对话</option>' + (data.conversations || []).map((item) => `<option value="${esc(item.id)}">${esc(item.title)} · ${new Date(item.updated_at).toLocaleString()}</option>`).join('');
+    if (currentConversationId) select.value = currentConversationId;
+  } catch (_) { /* Local chat remains usable when the shared store is offline. */ }
+}
+
+$('#workspace-upload').onchange = async (event) => {
+  const files = [...event.target.files];
+  if (!files.length) return;
+  const reply = addMessage('assistant', `正在把 ${files.length} 个文件加入${workspaceInfo[currentWorkspace][0]}资料库…`);
+  try {
+    const form = new FormData(); files.forEach((file) => form.append('files', file));
+    const spreadsheet = files.length === 1 && /\.(csv|xlsx|xlsm)$/i.test(files[0].name);
+    const endpoint = currentWorkspace === 'freight' && spreadsheet ? '/api/business/freight/import' : currentWorkspace === 'customer' && spreadsheet ? '/api/business/customers/import' : '/api/files/upload';
+    if (endpoint.endsWith('/import')) form.set('file', files[0]);
+    else form.append('folder', ({ product: '产品资料', customer: '客户资料', sales: '销售资料', payroll: '薪酬资料', rules: '团队规则资料', quote: '报价资料', pi: 'PI资料' })[currentWorkspace] || '共享资料');
+    const response = await fetch(endpoint, { method: 'POST', body: form });
+    const data = await response.json(); if (!response.ok) throw new Error(data.detail || '上传失败');
+    const summary = endpoint.endsWith('/import') ? `已从 ${data.source_file} 导入 ${data.imported} 条运费规则。` : `已上传并索引 ${data.uploaded || 0} 个文件。${data.files?.filter((f) => f.status === 'error').length ? '部分文件解析失败，请查看同步记录。' : ''}`;
+    reply.querySelector('.message-text').textContent = summary;
+    await loadStatus();
+    chatHistory.push({ role: 'assistant', content: summary });
+  } catch (error) { reply.querySelector('.message-text').textContent = error.message; }
+  finally { event.target.value = ''; }
+};
+$('#manage-team-rules').onclick = async () => { await loadTeamRules(); $('#rules-dialog').showModal(); };
+$('#close-rules').onclick = () => $('#rules-dialog').close();
+$('#rules-dialog').onclick = (event) => { if (event.target === $('#rules-dialog')) $('#rules-dialog').close(); };
+
+async function loadTeamRules() {
+  const list = $('#team-rules-list');
+  if (!list) return;
+  try {
+    const response = await fetch('/api/team/rules'); const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '读取规则失败');
+    list.innerHTML = (data.rules || []).length ? data.rules.map((rule) => `<article class="team-rule" data-rule-id="${esc(rule.id)}"><div><b>${esc(rule.name)}</b><small>${esc(workspaceInfo[rule.workspace]?.[0] || '所有助手')} · v${esc(rule.version)} · ${esc(rule.updated_by || '团队')}</small><p>${esc(rule.body)}</p></div><div><button type="button" class="secondary" data-rule-edit="${esc(rule.id)}">修改</button><button type="button" class="secondary" data-rule-delete="${esc(rule.id)}">停用</button></div></article>`).join('') : '<p>还没有发布团队规则。</p>';
+  } catch (error) { list.textContent = error.message; }
+}
+
+$('#rule-form').onsubmit = async (event) => {
+  event.preventDefault(); const form = event.target; const id = form.elements.namedItem('id').value;
+  const payload = { workspace: form.elements.namedItem('workspace').value, name: form.elements.namedItem('name').value, body: form.elements.namedItem('body').value };
+  try {
+    const response = await fetch(id ? `/api/team/rules/${id}` : '/api/team/rules', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await response.json(); if (!response.ok) throw new Error(data.detail || '发布失败');
+    form.reset(); form.elements.namedItem('id').value = ''; $('#rule-state').textContent = `规则已发布为 v${data.rule.version}，适用范围：${workspaceInfo[data.rule.workspace]?.[0] || '所有助手'}。`;
+    await loadTeamRules();
+  } catch (error) { $('#rule-state').textContent = error.message; }
+};
+
+$('#team-rules-list').onclick = async (event) => {
+  const edit = event.target.closest('[data-rule-edit]'); const remove = event.target.closest('[data-rule-delete]');
+  if (edit) {
+    const response = await fetch('/api/team/rules'); const data = await response.json(); const rule = data.rules?.find((item) => item.id === edit.dataset.ruleEdit);
+    if (rule) { const form = $('#rule-form'); form.elements.namedItem('id').value = rule.id; form.elements.namedItem('workspace').value = rule.workspace; form.elements.namedItem('name').value = rule.name; form.elements.namedItem('body').value = rule.body; $('#rule-state').textContent = '修改后会发布新版本，历史版本保留。'; }
+  }
+  if (remove && window.confirm('停用这条共享规则？历史记录会保留。')) {
+    const response = await fetch(`/api/team/rules/${remove.dataset.ruleDelete}`, { method: 'DELETE' });
+    if (!response.ok) { const data = await response.json(); toast(data.detail || '停用失败'); }
+    await loadTeamRules();
+  }
+};
 
 $('#open-model-settings').onclick = async () => {
   await loadModelConfig();
@@ -103,7 +223,63 @@ function renderReferences(bubble, data) {
     section.innerHTML = `<b>相似产品图片 (${images.length})</b><div class="chat-match-grid">${images.map((item) => { quoteCandidates.set(String(item.file_id), item); return `<div class="chat-match-card"><a href="/api/files/${item.file_id}/open" target="_blank"><img src="${item.preview_url}" loading="lazy" alt="${esc(item.name)}"><span>${esc(item.name)}</span><small>相似度 ${Number(item.similarity).toFixed(3)}</small></a><label><input type="checkbox" data-select-quote="${item.file_id}" ${selectedQuoteProducts.has(String(item.file_id)) ? 'checked' : ''}>加入报价</label></div>`; }).join('')}</div>`;
     body.append(section);
   }
+  if (data.proposed_action) {
+    const actionId = crypto.randomUUID(); pendingActions.set(actionId, data.proposed_action);
+    const card = document.createElement('div'); card.className = 'assistant-action-card';
+    card.innerHTML = `<b>待确认操作</b><pre>${esc(JSON.stringify(data.proposed_action.data, null, 2))}</pre><button type="button" class="primary" data-execute-action="${actionId}">确认并执行</button><span></span>`;
+    body.append(card);
+  }
 }
+
+$('#chat-thread').addEventListener('click', async (event) => {
+  const openDraft = event.target.closest('[data-open-quote-draft]');
+  if (openDraft) {
+    try {
+      const response = await fetch(`/api/quotes/${encodeURIComponent(openDraft.dataset.openQuoteDraft)}`);
+      const quote = await response.json(); if (!response.ok) throw new Error(quote.detail || '无法打开单据草稿');
+      fillQuoteForm(quote.data, quote.id, quote.quote_no); $('#quote-dialog').showModal();
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  const button = event.target.closest('[data-execute-action]');
+  if (!button) return;
+  const action = pendingActions.get(button.dataset.executeAction);
+  if (!action) return;
+  if (action.type.endsWith('.delete') && !window.confirm('确认删除这条业务记录？此操作会写入团队审计日志。')) return;
+  button.disabled = true; button.textContent = '正在执行…';
+  try {
+    const response = await fetch('/api/assistant/execute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspace: currentWorkspace, ...action }) });
+    const data = await response.json(); if (!response.ok) throw new Error(data.detail || '执行失败');
+    const result = data.result || {}; let summary = result.message || '';
+    if (result.calculation?.freight_total != null) {
+      const calc = result.calculation;
+      summary = `运费计算完成：${calc.currency} ${Number(calc.freight_total).toFixed(2)}。计费单位 ${calc.rate_unit}，计价数量 ${calc.basis_quantity}；体积重 ${calc.volumetric_weight_kg} kg，计费重 ${calc.chargeable_weight_kg} kg。卖方承担费用类别：${calc.seller_cost_components.join('、') || '无（EXW）'}。`;
+    }
+    if (result.calculation?.commission_total != null) {
+      const calc = result.calculation;
+      summary = `工资草稿已建立：${calc.seller_name}，${calc.period_start} 至 ${calc.period_end}；提成 ${calc.commission_total}（${calc.basis} 口径，${calc.rate_percent}%）。${calc.note}`;
+    } else if (result.calculation?.currency_totals) {
+      const calc = result.calculation;
+      const totals = Object.entries(calc.currency_totals).map(([currency, values]) => `${currency} ${values.commission.toFixed(2)}`).join('；');
+      summary = `工资草稿已建立：${calc.seller_name}，${calc.period_start} 至 ${calc.period_end}；分币种提成 ${totals}（${calc.basis} 口径，${calc.rate_percent}%）。${calc.note}`;
+    }
+    if (result.draft?.id) summary += ` 草稿编号：${result.draft.id}`;
+    button.textContent = '已执行';
+    const resultBox = button.closest('.assistant-action-card').querySelector('span');
+    resultBox.textContent = summary;
+    if (result.draft?.id) {
+      const download = document.createElement('a'); download.href = `/api/business/payroll/${encodeURIComponent(result.draft.id)}/csv`; download.textContent = '下载工资明细 CSV'; download.className = 'payroll-download'; resultBox.append(document.createElement('br'), download);
+    }
+    if (result.quote_draft?.id) {
+      const openQuote = document.createElement('button'); openQuote.type = 'button'; openQuote.className = 'secondary'; openQuote.dataset.openQuoteDraft = result.quote_draft.id; openQuote.textContent = `打开草稿 ${result.quote_draft.quote_no}`; resultBox.append(document.createElement('br'), openQuote);
+    }
+    chatHistory.push({ role: 'assistant', content: summary });
+    if (currentConversationId) await fetch('/api/conversations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: currentConversationId, workspace: currentWorkspace, messages: chatHistory }) });
+  } catch (error) {
+    button.disabled = false; button.textContent = '重试执行';
+    button.closest('.assistant-action-card').querySelector('span').textContent = error.message;
+  }
+});
 
 $('#chat-thread').addEventListener('change', (event) => {
   const checkbox = event.target.closest('[data-select-quote]');
@@ -163,6 +339,8 @@ $('#chat-form').onsubmit = async (event) => {
   form.append('message', message);
   form.append('history', JSON.stringify(chatHistory.slice(-8)));
   form.append('model_id', $('#chat-model-select').value || 'local');
+  form.append('workspace', currentWorkspace);
+  form.append('conversation_id', currentConversationId);
   form.append('image_threshold', $('#image-threshold').value || '0.20');
   if (image) form.append('image', image);
 
@@ -175,6 +353,10 @@ $('#chat-form').onsubmit = async (event) => {
     renderReferences(reply, data);
     chatHistory.push({ role: 'user', content: userText }, { role: 'assistant', content: data.answer || '' });
     chatHistory = chatHistory.slice(-12);
+    try {
+      const saved = await fetch('/api/conversations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: currentConversationId, workspace: currentWorkspace, messages: chatHistory }) });
+      if (saved.ok) { const savedData = await saved.json(); currentConversationId = savedData.conversation.id; await loadWorkspaceConversations(); }
+    } catch (_) { /* Preserve the successful model answer if shared history is unavailable. */ }
   } catch (error) {
     pending.remove();
     addMessage('assistant', error.message || '暂时无法回答，请检查模型设置和服务状态。');
@@ -505,7 +687,7 @@ function quotePayload() {
     quote_date: quoteDate, valid_until: Number.isNaN(expiry.getTime()) ? '' : expiry.toISOString().slice(0,10), currency: value('currency'),
     exchange_rate: value('exchange_rate'), exchange_date: value('exchange_date'), origin_port: value('origin_port'), destination_port: value('destination_port'), insurance_term: value('insurance_term'),
     incoterm: selectValue('incoterm','incoterm_custom'), payment_terms: selectValue('payment_terms','payment_terms_custom'), payment_note: value('payment_note'), shipping_term: selectValue('shipping_term','shipping_term_custom'), tax_term: selectValue('tax_term','tax_term_custom'), tax_amount: value('tax_amount') || '0', tax_note: value('tax_note'), delivery_time: value('delivery_time'), bank_details: value('bank_details'), notes: value('notes'),
-    shipping: value('shipping') || '0', other_fees: value('other_fees') || '0',
+    shipping: value('shipping') || '0', origin_charges: value('origin_charges') || '0', insurance_amount: value('insurance_amount') || '0', destination_charges: value('destination_charges') || '0', duties: value('duties') || '0', other_fees: value('other_fees') || '0',
     items: [...document.querySelectorAll('.quote-item-row')].map((row) => {
       const item = {};
       row.querySelectorAll('[data-field]').forEach((input) => { item[input.dataset.field] = input.value.trim(); });
@@ -523,7 +705,13 @@ function updateQuoteTotal() {
     const discount = Math.min(100, Math.max(0, Number(item.discount_percent) || 0));
     return sum + qty * price * (1 - discount / 100);
   }, 0);
-  const total = subtotal + (Number(payload.shipping) || 0) + (Number(payload.other_fees) || 0) + (Number(payload.tax_amount) || 0);
+  const term = payload.incoterm.toUpperCase();
+  const includedByTerm = { EXW: [], FCA: ['origin_charges'], FAS: ['origin_charges'], FOB: ['origin_charges'], CFR: ['origin_charges','shipping'], CPT: ['origin_charges','shipping'], CIF: ['origin_charges','shipping','insurance_amount'], CIP: ['origin_charges','shipping','insurance_amount'], DAP: ['origin_charges','shipping','destination_charges'], DPU: ['origin_charges','shipping','destination_charges'], DDP: ['origin_charges','shipping','destination_charges','duties'] };
+  const included = new Set(includedByTerm[term] || (payload.shipping_term === 'Included' ? ['shipping'] : []));
+  if (!['CIF','CIP'].includes(term) && ['Seller','Included'].includes(payload.insurance_term)) included.add('insurance_amount');
+  if (payload.tax_term === 'Included') included.add('tax_amount');
+  included.add('other_fees');
+  const total = subtotal + [...included].reduce((sum, key) => sum + (Number(payload[key]) || 0), 0);
   $('#quote-total').textContent = `总计：${payload.currency} ${total.toFixed(places)}`;
   const belowMoq = payload.items.filter((item) => Number(item.moq) > 0 && Number(item.quantity) < Number(item.moq));
   if (belowMoq.length) $('#quote-state').textContent = `MOQ 未达标：${belowMoq.map((item) => item.name).join('、')}。请核对起订量。`;
@@ -537,8 +725,8 @@ function fillQuoteForm(data, id = null, quoteNo = '') {
   if (data.document_type === 'Q') data.document_type = 'quote';
   data.document_type ||= 'quote'; data.language ||= 'zh'; data.incoterm ||= 'EXW'; data.payment_terms ||= 'T/T 30% deposit, 70% before shipment'; data.insurance_term ||= 'Buyer';
   data.shipping_term ||= 'Excluded'; data.tax_term ||= 'Excluded';
-  for (const name of ['document_type','language','template_name','company_name','company_address','company_phone','company_email','customer','customer_address','quote_date','currency','exchange_rate','exchange_date','origin_port','destination_port','insurance_term','delivery_time','bank_details','notes','shipping','other_fees','shipping_term','tax_term','tax_amount','tax_note','payment_note']) {
-    form.elements.namedItem(name).value = data[name] ?? (name === 'quote_date' ? new Date().toISOString().slice(0,10) : ['shipping','other_fees'].includes(name) ? '0' : name === 'currency' ? 'USD' : '');
+  for (const name of ['document_type','language','template_name','company_name','company_address','company_phone','company_email','customer','customer_address','quote_date','currency','exchange_rate','exchange_date','origin_port','destination_port','insurance_term','delivery_time','bank_details','notes','shipping','origin_charges','insurance_amount','destination_charges','duties','other_fees','shipping_term','tax_term','tax_amount','tax_note','payment_note']) {
+    form.elements.namedItem(name).value = data[name] ?? (name === 'quote_date' ? new Date().toISOString().slice(0,10) : ['shipping','origin_charges','insurance_amount','destination_charges','duties','other_fees','tax_amount'].includes(name) ? '0' : name === 'currency' ? 'USD' : '');
   }
   for (const [selectName, customName] of [['incoterm','incoterm_custom'],['payment_terms','payment_terms_custom'],['shipping_term','shipping_term_custom'],['tax_term','tax_term_custom']]) {
     const select = form.elements.namedItem(selectName); const raw = data[selectName] || '';
@@ -679,7 +867,7 @@ async function importSelectedQuoteProducts() {
       const previous = previousItems.get(String(item.image_file_id || ''));
       return previous ? { ...item, quantity: previous.quantity, unit_price: previous.unit_price, discount_percent: previous.discount_percent } : item;
     });
-    const merged = { ...current, ...draft, document_type: current.document_type, language: current.language, template_name: current.template_name, company_name: current.company_name, company_address: current.company_address, company_phone: current.company_phone, company_email: current.company_email, company_contact: current.company_contact, currency: current.currency, quote_date: current.quote_date, exchange_rate: current.exchange_rate, exchange_date: current.exchange_date, origin_port: current.origin_port, destination_port: current.destination_port, insurance_term: current.insurance_term, incoterm: current.incoterm, payment_terms: current.payment_terms, payment_note: current.payment_note, shipping_term: current.shipping_term, tax_term: current.tax_term, tax_amount: current.tax_amount, tax_note: current.tax_note, shipping: current.shipping, other_fees: current.other_fees, items: importedItems.length ? importedItems : current.items };
+    const merged = { ...current, ...draft, document_type: current.document_type, language: current.language, template_name: current.template_name, company_name: current.company_name, company_address: current.company_address, company_phone: current.company_phone, company_email: current.company_email, company_contact: current.company_contact, currency: current.currency, quote_date: current.quote_date, exchange_rate: current.exchange_rate, exchange_date: current.exchange_date, origin_port: current.origin_port, destination_port: current.destination_port, insurance_term: current.insurance_term, incoterm: current.incoterm, payment_terms: current.payment_terms, payment_note: current.payment_note, shipping_term: current.shipping_term, tax_term: current.tax_term, tax_amount: current.tax_amount, tax_note: current.tax_note, origin_charges: current.origin_charges, shipping: current.shipping, insurance_amount: current.insurance_amount, destination_charges: current.destination_charges, duties: current.duties, other_fees: current.other_fees, items: importedItems.length ? importedItems : current.items };
     fillQuoteForm(merged);
     autoImportedSelection = [...selectedQuoteProducts.keys()].sort().join(',');
     $('#quote-state').textContent = `已匹配 ${draft.items?.length || 0} 个所选产品，每个勾选项单独一行。公司信息请填写；生成前可核对价格。`;
@@ -775,3 +963,4 @@ loadStatus();
 loadChatModels();
 loadQuoteTemplates().then(() => fillQuoteForm({}));
 loadQuotes();
+setWorkspace(workspaceInfo[currentWorkspace] ? currentWorkspace : 'product');
