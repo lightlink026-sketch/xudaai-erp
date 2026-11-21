@@ -45,7 +45,8 @@ def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
         quantity = _money(raw.get("quantity", 1), f"第 {index} 行数量", 3)
         unit_price = _money(raw.get("unit_price", 0), f"第 {index} 行单价", places)
         discount = _money(raw.get("discount_percent", 0), f"第 {index} 行折扣", 2)
-        if quantity <= 0 or unit_price < 0 or not 0 <= discount <= 100:
+        moq = _money(raw.get("moq", 0), f"第 {index} 行 MOQ", 0)
+        if quantity <= 0 or unit_price < 0 or moq < 0 or not 0 <= discount <= 100:
             raise HTTPException(422, f"第 {index} 行数量、单价或折扣超出范围")
         amount = (quantity * unit_price * (Decimal("1") - discount / Decimal("100"))).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
         subtotal += amount
@@ -53,6 +54,9 @@ def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
             "name": name,
             "description": str(raw.get("description", "")).strip()[:1500],
             "configuration": str(raw.get("configuration", "")).strip()[:1000],
+            "colors": str(raw.get("colors", "")).strip()[:1000],
+            "size_breakdown": str(raw.get("size_breakdown", "")).strip()[:1000],
+            "moq": str(moq),
             "quantity": str(quantity),
             "unit": str(raw.get("unit", "pcs")).strip()[:30] or "pcs",
             "unit_price": str(unit_price),
@@ -76,6 +80,11 @@ def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
         "quote_date": quote_date,
         "valid_until": str(payload.get("valid_until", "")).strip()[:30],
         "currency": currency,
+        "exchange_rate": str(payload.get("exchange_rate", "")).strip()[:40],
+        "exchange_date": str(payload.get("exchange_date", "")).strip()[:30],
+        "origin_port": str(payload.get("origin_port", "")).strip()[:150],
+        "destination_port": str(payload.get("destination_port", "")).strip()[:150],
+        "insurance_term": str(payload.get("insurance_term", "Buyer")).strip()[:100],
         "document_type": "pi" if str(payload.get("document_type", "quote")).lower() == "pi" else "quote",
         "template_name": str(payload.get("template_name", "")).strip()[:150],
         "incoterm": str(payload.get("incoterm", "")).strip()[:100],
@@ -156,7 +165,7 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
     if template_path and template_path.is_file():
         from docx import Document
         template = Document(str(template_path))
-        items_text = "\n".join(f"{i}. {item['name']} | {item.get('description') or ''} | {item.get('configuration') or ''} | {item['quantity']} {item['unit']} × {item['unit_price']} = {item['amount']} {data['currency']}" for i, item in enumerate(data["items"], 1))
+        items_text = "\n".join(f"{i}. {item['name']} | {item.get('description') or ''} | {item.get('colors') or ''} | {item.get('size_breakdown') or ''} | {item.get('configuration') or ''} | {item['quantity']} {item['unit']} × {item['unit_price']} = {item['amount']} {data['currency']}" for i, item in enumerate(data["items"], 1))
         values = {
             "quote_no": quote_no, "document_no": quote_no, "customer": data.get("customer", ""),
             "customer_address": data.get("customer_address", ""), "quote_date": data.get("quote_date", ""),
@@ -164,6 +173,9 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
             "payment_terms": data.get("payment_terms", ""), "payment_note": data.get("payment_note", ""),
             "shipping_term": data.get("shipping_term", ""), "tax_term": data.get("tax_term", ""),
             "tax_note": data.get("tax_note", ""), "company_name": data.get("company_name", ""),
+            "exchange_rate": data.get("exchange_rate", ""), "exchange_date": data.get("exchange_date", ""),
+            "origin_port": data.get("origin_port", ""), "destination_port": data.get("destination_port", ""),
+            "insurance_term": data.get("insurance_term", ""),
             "delivery_time": data.get("delivery_time", ""), "bank_details": data.get("bank_details", ""),
             "company_contact": data.get("company_contact", ""), "subtotal": data["subtotal"],
             "shipping": data["shipping"], "other_fees": data["other_fees"], "total": data["total"],
@@ -205,6 +217,12 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
             details += f"\n价格/资料来源：{item['source']}"
         if item.get("configuration"):
             details += f"\n颜色/尺码/配比：{item['configuration']}"
+        if item.get("colors"):
+            details += f"\n颜色/颜色数量：{item['colors']}"
+        if item.get("size_breakdown"):
+            details += f"\n尺码配比：{item['size_breakdown']}"
+        if Decimal(item.get("moq", "0")) > 0:
+            details += f"\nMOQ：{item['moq']} {item['unit']}"
         rows.append([
             Paragraph(safe(item["name"]), body), Paragraph(safe(details), small),
             Paragraph(f"{safe(item['quantity'])} {safe(item['unit'])}", body), Paragraph(safe(item["unit_price"]), body),
@@ -226,7 +244,7 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
         [Paragraph("总计", ParagraphStyle("TotalLabel", parent=body, fontSize=11)), Paragraph(f"{safe(data['currency'])} {safe(data['total'])}", ParagraphStyle("Total", parent=right, fontSize=12, textColor=colors.HexColor("#17765d")))],
     ]
     story.append(Table(summary, colWidths=[140*mm, 38*mm], hAlign="RIGHT", style=TableStyle([("ALIGN",(1,0),(1,-1),"RIGHT"),("LINEABOVE",(0,4),(-1,4),0.8,colors.HexColor("#9db7a4")),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)])))
-    terms = [("贸易条款", data.get("incoterm")), ("付款条款", "；".join(x for x in [data.get("payment_terms", ""), data.get("payment_note", "")] if x)), ("运费", f"{data.get('shipping_term','')}；金额 {data.get('currency')} {data.get('shipping','0')}"), ("税费", "；".join(x for x in [data.get("tax_term", ""), data.get("tax_note", ""), f"金额 {data.get('currency')} {data.get('tax_amount','0')}"] if x)), ("交付时间", data.get("delivery_time")), ("收款信息", data.get("bank_details")), ("备注", data.get("notes"))]
+    terms = [("贸易条款", "；".join(x for x in [data.get("incoterm", ""), data.get("origin_port", ""), data.get("destination_port", "")] if x)), ("付款条款", "；".join(x for x in [data.get("payment_terms", ""), data.get("payment_note", "")] if x)), ("运费", f"{data.get('shipping_term','')}；金额 {data.get('currency')} {data.get('shipping','0')}"), ("保险", data.get("insurance_term")), ("税费", "；".join(x for x in [data.get("tax_term", ""), data.get("tax_note", ""), f"金额 {data.get('currency')} {data.get('tax_amount','0')}"] if x)), ("汇率基准", f"{data.get('exchange_rate','')} / {data.get('exchange_date','')}" if data.get("exchange_rate") else ""), ("交付时间", data.get("delivery_time")), ("收款信息", data.get("bank_details")), ("备注", data.get("notes"))]
     for label, value in terms:
         if value:
             story.extend([Spacer(1, 4*mm), Paragraph(f"<b>{label}</b>：{safe(value)}", body)])

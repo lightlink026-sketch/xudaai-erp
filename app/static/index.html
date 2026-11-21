@@ -46,11 +46,13 @@
       </dialog>
       <dialog id="quote-dialog" class="model-dialog quote-dialog">
         <div class="model-dialog-head"><div><span class="eyebrow">DOCUMENT BUILDER</span><h2>报价单 / PI</h2></div><button id="close-quote-dialog" type="button" aria-label="关闭">×</button></div>
-        <p class="model-dialog-intro">可先在 AI 对话中查询产品，再填写并核对单据。系统只按确认后的价格计算金额。</p>
+        <p class="model-dialog-intro">选择产品资料，填写客户和条款，直接生成报价单或 PI PDF。</p>
         <div class="quote-card">
           <div class="quote-form-head"><h3 id="quote-form-title">新建单据</h3><span id="quote-number"></span></div>
           <div id="quote-selected-products" class="quote-selected-products"><span>还没有勾选产品。请先在对话结果中勾选产品图片或资料。</span></div>
+          <div class="quote-stepper"><button type="button" data-step-go="1" class="active">1 产品</button><button type="button" data-step-go="2">2 客户</button><button type="button" data-step-go="3">3 条款</button></div>
           <form id="quote-form">
+            <section class="quote-stage" data-quote-stage="1">
             <div class="quote-step-title">第 1 步：产品与数量配置</div>
             <div class="quote-fields">
               <label>单据类型<select name="document_type"><option value="quote">产品报价单</option><option value="pi">PI 形式发票</option></select></label>
@@ -62,6 +64,8 @@
             <p class="template-hint">DOCX 模板可放在 data/templates（或 TEMPLATES_DIR）目录，也可在这里上传。占位符：{{customer}}、{{quote_no}}、{{items}}、{{subtotal}}、{{total}}、{{payment_terms}}、{{bank_details}}。当前会保留模板段落与表格文字，复杂样式和图片不保证原样。</p>
             <div class="quote-items-head"><h3>已选产品（可调整颜色/尺码/数量）</h3><button id="quote-add-item" class="secondary" type="button">＋ 添加产品</button></div>
             <div id="quote-items"></div>
+            </section>
+            <section class="quote-stage" data-quote-stage="2" hidden>
             <div class="quote-step-title">第 2 步：客户信息</div>
             <div class="quote-fields">
               <label>选择已保存客户<select id="quote-customer-select"><option value="">新客户 / 手动填写</option></select></label>
@@ -69,12 +73,19 @@
               <label>客户地址<input name="customer_address" placeholder="客户地址"></label>
               <button type="button" class="secondary" id="quote-save-customer">保存为常用客户</button>
             </div>
+            </section>
+            <section class="quote-stage" data-quote-stage="3" hidden>
             <div class="quote-step-title">第 3 步：贸易与付款条款</div>
             <div class="quote-fields">
               <label>报价日期<input name="quote_date" type="date" required></label>
               <label>有效期<select name="valid_days" id="quote-valid-days"><option value="7">7 天</option><option value="15">15 天</option><option value="30" selected>30 天</option><option value="60">60 天</option><option value="90">90 天</option><option value="custom">自定义</option></select><input name="valid_days_custom" type="number" min="1" max="365" value="30" hidden></label>
               <label>币种<select name="currency"><option>USD</option><option>EUR</option><option>CNY</option><option>GBP</option><option>JPY</option></select></label>
+              <label>汇率（选填）<input name="exchange_rate" type="number" min="0" step="0.0001" placeholder="仅记录，不自动换算"></label>
+              <label>汇率基准日<input name="exchange_date" type="date"></label>
               <label>贸易条款<select name="incoterm"><option value="EXW">EXW 工厂交货</option><option value="FOB">FOB 装运港船上交货</option><option value="CIF">CIF 成本、保险费加运费</option><option value="CFR">CFR 成本加运费</option><option value="DDP">DDP 完税后交货</option><option value="custom">自定义</option></select><input name="incoterm_custom" placeholder="填写自定义贸易条款" hidden></label>
+              <label>起运港<input name="origin_port" placeholder="例如 Shenzhen"></label>
+              <label>目的港<input name="destination_port" placeholder="例如 Los Angeles"></label>
+              <label>保险<select name="insurance_term"><option value="Buyer">买方承担</option><option value="Seller">卖方承担</option><option value="Included">已含保险</option><option value="N/A">不适用</option></select></label>
               <label>付款方式<select name="payment_terms"><option value="T/T 30% deposit, 70% before shipment">T/T 30% 订金，发货前付清</option><option value="100% T/T before shipment">发货前 100% T/T</option><option value="Letter of Credit at sight">即期信用证</option><option value="PayPal">PayPal</option><option value="custom">自定义</option></select><input name="payment_terms_custom" placeholder="填写自定义付款方式" hidden></label>
               <label>运费<select name="shipping_term"><option value="Excluded">不含运费</option><option value="Included">含运费</option><option value="Collect">运费到付</option><option value="custom">自定义</option></select><input name="shipping_term_custom" placeholder="自定义运费条款" hidden></label>
               <label>税费<select name="tax_term"><option value="Excluded">不含税</option><option value="Included">含税</option><option value="N/A">不适用</option><option value="custom">自定义</option></select><input name="tax_term_custom" placeholder="自定义税费条款" hidden></label>
@@ -89,8 +100,10 @@
               <label>其他费用<input name="other_fees" type="number" min="0" step="0.01" value="0"></label>
               <label class="quote-wide">备注<textarea name="notes" rows="2" placeholder="交期、包装、报价说明等"></textarea></label>
             </div>
+            </section>
+            <div class="quote-wizard-actions"><button type="button" id="quote-prev" class="secondary" hidden>上一步</button><span id="quote-stage-label">第 1 步，共 3 步</span><button type="button" id="quote-next" class="primary">下一步</button></div>
             <div id="quote-total" class="quote-total">总计：USD 0.00</div>
-            <div class="quote-actions"><span id="quote-state">产品价格和运费请在生成前核对。</span><button type="button" class="secondary" id="quote-import-chat">从 AI 对话整理</button><button type="button" class="secondary" id="quote-save-defaults">保存默认配置</button><button type="button" class="secondary" id="quote-save">保存草稿</button><button type="button" class="primary" id="quote-pdf">生成并下载 PDF</button><button type="button" class="secondary" id="quote-new">新建</button></div>
+            <div class="quote-actions"><span id="quote-state"></span><button type="button" class="secondary" id="quote-import-chat">导入已选产品</button><button type="button" class="secondary" id="quote-save-defaults">保存默认配置</button><button type="button" class="secondary" id="quote-save">保存草稿</button><button type="button" class="primary" id="quote-pdf">生成并下载 PDF</button><button type="button" class="secondary" id="quote-new">新建</button></div>
           </form>
         </div>
         <div class="quote-list-card"><h3>报价 / PI 记录</h3><div id="quote-list"><p>载入中…</p></div></div>

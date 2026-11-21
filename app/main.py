@@ -464,7 +464,8 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
     history = payload.get("history", [])
     if not isinstance(history, list):
         raise HTTPException(422, "对话记录格式无效")
-    conversation = "\n".join(f"{str(item.get('role',''))}: {str(item.get('content',''))[:2000]}" for item in history[-16:] if isinstance(item, dict) and item.get("role") in {"user", "assistant"})[:16000]
+    user_turns = [str(item.get("content", ""))[:1200] for item in history if isinstance(item, dict) and item.get("role") == "user"]
+    conversation = "\n".join(f"用户：{turn}" for turn in user_turns[-8:])[:8000]
     selected_ids = payload.get("selected_products", [])
     if not isinstance(selected_ids, list):
         selected_ids = []
@@ -488,11 +489,14 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
     if not conversation.strip() and not selected_context:
         raise HTTPException(400, "请先在 AI 对话中检索并勾选产品资料，或补充对话内容")
     doc_type = "PI" if str(payload.get("document_type", "quote")).lower() == "pi" else "报价单"
-    schema = {"customer":"", "customer_address":"", "quote_date":"", "valid_until":"", "currency":"USD", "incoterm":"", "payment_terms":"", "delivery_time":"", "bank_details":"", "notes":"", "items":[{"name":"", "description":"", "configuration":"", "quantity":"1", "unit":"pcs", "unit_price":"0", "discount_percent":"0", "source":"需人工核对"}]}
+    requested_currency = str(payload.get("currency", "USD")).upper()
+    if requested_currency not in {"USD", "EUR", "CNY", "GBP", "JPY"}:
+        requested_currency = "USD"
+    schema = {"customer":"", "customer_address":"", "quote_date":"", "valid_until":"", "currency":requested_currency, "incoterm":"", "payment_terms":"", "delivery_time":"", "bank_details":"", "notes":"", "items":[{"name":"", "description":"", "colors":"", "size_breakdown":"", "configuration":"", "quantity":"1", "moq":"0", "unit":"pcs", "unit_price":"0", "discount_percent":"0", "source":"需人工核对"}]}
     instruction = (
-        f"从已勾选的产品资料和用户与助手对话整理一份{doc_type}草稿。产品名称、描述、型号、颜色尺码可从已勾选资料提取；价格、数量、客户地址、付款/运费或交易条款只有在资料或对话明确给出时才提取，不得推断。"
+        f"从已勾选的产品资料和用户输入整理一份{doc_type}草稿。单据币种为 {requested_currency}；单价只取资料中该币种对应的明确价格栏，缺少该币种价格就留 0 并标需核对，禁止自行按汇率换算。产品名称、描述、型号、颜色尺码可从已勾选资料提取；价格、数量、客户地址、付款/运费或交易条款只有在资料或用户明确给出时才提取，不得推断。"
         "缺失的单价填写 0，并在 source 标注‘需人工核对’；缺失的数量默认 1 但需用户核对；缺失的其他文字字段留空。"
-        "颜色、尺码、配比等变体信息写入 configuration 字段，不能丢弃。\n"
+        "颜色和数量写入 colors；36-44 或其他尺码分布写入 size_breakdown；其他规格写入 configuration，不能丢弃。\n"
         f"只返回一个符合 JSON 语法的对象，不要 Markdown。字段结构：{json.dumps(schema, ensure_ascii=False)}\n\n对话：\n{conversation}"
         + ("\n\n用户勾选的资料摘录：\n" + "\n\n".join(selected_context[:20])[:18000] if selected_context else "")
     )

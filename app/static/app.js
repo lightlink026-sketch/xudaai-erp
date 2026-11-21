@@ -414,13 +414,11 @@ $('#close-quote-dialog').onclick = () => $('#quote-dialog').close();
 $('#quote-dialog').onclick = (event) => { if (event.target === $('#quote-dialog')) $('#quote-dialog').close(); };
 $('#start-quote').onclick = () => {
   pendingDocumentType = 'quote'; fillQuoteForm({ document_type: 'quote' });
-  $('#chat-message').value = '我要制作产品报价单，请先根据我提供的产品型号或图片查询资料，并逐步询问报价所需信息。价格、数量、客户信息和贸易条款未知时请向我确认，不要猜测。';
-  $('#chat-form').requestSubmit();
+  $('#open-quote-dialog').click();
 };
 $('#start-pi').onclick = () => {
   pendingDocumentType = 'pi'; fillQuoteForm({ document_type: 'pi' });
-  $('#chat-message').value = '我要制作 PI 形式发票，请先根据我提供的产品型号或图片查询资料，并逐步询问客户、产品、数量、付款、贸易条款和交付信息。单价、运费或银行信息未知时请向我确认，不要猜测。';
-  $('#chat-form').requestSubmit();
+  $('#open-quote-dialog').click();
 };
 
 $('#quote-template-upload').onchange = async (event) => {
@@ -440,7 +438,7 @@ $('#quote-template-upload').onchange = async (event) => {
 function addQuoteItem(item = {}) {
   const row = document.createElement('div');
   row.className = 'quote-item-row';
-  row.innerHTML = `<div class="quote-item-fields"><label>产品名称/型号<input data-field="name" required value="${esc(item.name || '')}" placeholder="产品型号"></label><label>描述<input data-field="description" value="${esc(item.description || '')}" placeholder="产品描述"></label><label>颜色/尺码/配比<input data-field="configuration" value="${esc(item.configuration || '')}" placeholder="如黑/白各10双，36-44尺码配比"></label><label>数量<input data-field="quantity" type="number" min="0.001" step="0.001" value="${esc(item.quantity || '1')}"></label><label>单位<input data-field="unit" value="${esc(item.unit || 'pcs')}"></label><label>单价<input data-field="unit_price" type="number" min="0" step="0.01" value="${esc(item.unit_price || '0')}"></label><label>折扣 %<input data-field="discount_percent" type="number" min="0" max="100" step="0.01" value="${esc(item.discount_percent || '0')}"></label><label>价格/资料来源<input data-field="source" value="${esc(item.source || '人工确认')}" placeholder="文件名、工作表或人工确认"></label></div><button type="button" class="quote-remove" aria-label="删除产品行">删除</button>`;
+  row.innerHTML = `<div class="quote-item-fields"><label>产品名称/型号<input data-field="name" required value="${esc(item.name || '')}" placeholder="产品型号"></label><label>描述<input data-field="description" value="${esc(item.description || '')}" placeholder="产品描述"></label><label>颜色及数量<input data-field="colors" value="${esc(item.colors || '')}" placeholder="黑色 10 双；卡其 20 双"></label><label>尺码配比<input data-field="size_breakdown" value="${esc(item.size_breakdown || '')}" placeholder="36:2, 37:4, 38:6…"></label><label>其他配置<input data-field="configuration" value="${esc(item.configuration || '')}" placeholder="其他规格说明"></label><label>总数量<input data-field="quantity" type="number" min="0.001" step="0.001" value="${esc(item.quantity || '1')}"></label><label>MOQ<input data-field="moq" type="number" min="0" step="1" value="${esc(item.moq || '0')}"></label><label>单位<input data-field="unit" value="${esc(item.unit || 'pcs')}"></label><label>单价<input data-field="unit_price" type="number" min="0" step="0.01" value="${esc(item.unit_price || '0')}"></label><label>折扣 %<input data-field="discount_percent" type="number" min="0" max="100" step="0.01" value="${esc(item.discount_percent || '0')}"></label><label>价格/资料来源<input data-field="source" value="${esc(item.source || '人工确认')}" placeholder="文件名、工作表或人工确认"></label></div><button type="button" class="quote-remove" aria-label="删除产品行">删除</button>`;
   row.querySelectorAll('input').forEach((input) => input.addEventListener('input', updateQuoteTotal));
   row.querySelector('.quote-remove').onclick = () => { row.remove(); updateQuoteTotal(); };
   $('#quote-items').append(row);
@@ -460,6 +458,7 @@ function quotePayload() {
     company_name: value('company_name'), company_contact: value('company_contact'),
     customer: value('customer'), customer_address: value('customer_address'),
     quote_date: quoteDate, valid_until: Number.isNaN(expiry.getTime()) ? '' : expiry.toISOString().slice(0,10), currency: value('currency'),
+    exchange_rate: value('exchange_rate'), exchange_date: value('exchange_date'), origin_port: value('origin_port'), destination_port: value('destination_port'), insurance_term: value('insurance_term'),
     incoterm: selectValue('incoterm','incoterm_custom'), payment_terms: selectValue('payment_terms','payment_terms_custom'), payment_note: value('payment_note'), shipping_term: selectValue('shipping_term','shipping_term_custom'), tax_term: selectValue('tax_term','tax_term_custom'), tax_amount: value('tax_amount') || '0', tax_note: value('tax_note'), delivery_time: value('delivery_time'), bank_details: value('bank_details'), notes: value('notes'),
     shipping: value('shipping') || '0', other_fees: value('other_fees') || '0',
     items: [...document.querySelectorAll('.quote-item-row')].map((row) => {
@@ -481,6 +480,8 @@ function updateQuoteTotal() {
   }, 0);
   const total = subtotal + (Number(payload.shipping) || 0) + (Number(payload.other_fees) || 0) + (Number(payload.tax_amount) || 0);
   $('#quote-total').textContent = `总计：${payload.currency} ${total.toFixed(places)}`;
+  const belowMoq = payload.items.filter((item) => Number(item.moq) > 0 && Number(item.quantity) < Number(item.moq));
+  if (belowMoq.length) $('#quote-state').textContent = `MOQ 未达标：${belowMoq.map((item) => item.name).join('、')}。请核对起订量。`;
 }
 
 function fillQuoteForm(data, id = null, quoteNo = '') {
@@ -488,9 +489,9 @@ function fillQuoteForm(data, id = null, quoteNo = '') {
   data = { ...quoteDefaults, ...data };
   if (data.document_type === 'PI') data.document_type = 'pi';
   if (data.document_type === 'Q') data.document_type = 'quote';
-  data.document_type ||= 'quote'; data.incoterm ||= 'EXW'; data.payment_terms ||= 'T/T 30% deposit, 70% before shipment';
+  data.document_type ||= 'quote'; data.incoterm ||= 'EXW'; data.payment_terms ||= 'T/T 30% deposit, 70% before shipment'; data.insurance_term ||= 'Buyer';
   data.shipping_term ||= 'Excluded'; data.tax_term ||= 'Excluded';
-  for (const name of ['document_type','template_name','company_name','company_contact','customer','customer_address','quote_date','currency','delivery_time','bank_details','notes','shipping','other_fees','shipping_term','tax_term','tax_amount','tax_note','payment_note']) {
+  for (const name of ['document_type','template_name','company_name','company_contact','customer','customer_address','quote_date','currency','exchange_rate','exchange_date','origin_port','destination_port','insurance_term','delivery_time','bank_details','notes','shipping','other_fees','shipping_term','tax_term','tax_amount','tax_note','payment_note']) {
     form.elements.namedItem(name).value = data[name] ?? (name === 'quote_date' ? new Date().toISOString().slice(0,10) : ['shipping','other_fees'].includes(name) ? '0' : name === 'currency' ? 'USD' : '');
   }
   for (const [selectName, customName] of [['incoterm','incoterm_custom'],['payment_terms','payment_terms_custom'],['shipping_term','shipping_term_custom'],['tax_term','tax_term_custom']]) {
@@ -512,8 +513,47 @@ function fillQuoteForm(data, id = null, quoteNo = '') {
   $('#quote-state').textContent = '产品价格请在生成前核对。';
   $('#quote-save').disabled = false;
   $('#quote-pdf').disabled = false;
+  showQuoteStage(1);
   updateQuoteTotal();
 }
+
+let activeQuoteStage = 1;
+function showQuoteStage(stage) {
+  activeQuoteStage = Math.max(1, Math.min(3, stage));
+  document.querySelectorAll('[data-quote-stage]').forEach((panel) => { panel.hidden = Number(panel.dataset.quoteStage) !== activeQuoteStage; });
+  document.querySelectorAll('[data-step-go]').forEach((button) => button.classList.toggle('active', Number(button.dataset.stepGo) === activeQuoteStage));
+  $('#quote-stage-label').textContent = `第 ${activeQuoteStage} 步，共 3 步`;
+  $('#quote-prev').hidden = activeQuoteStage === 1;
+  $('#quote-next').hidden = activeQuoteStage === 3;
+  $('#quote-import-chat').hidden = activeQuoteStage !== 1;
+  $('#quote-save').hidden = activeQuoteStage !== 3;
+  $('#quote-pdf').hidden = activeQuoteStage !== 3;
+  $('#quote-save-defaults').hidden = activeQuoteStage !== 3;
+}
+
+function validateQuoteStage(stage) {
+  if (stage === 1) {
+    const rows = [...document.querySelectorAll('.quote-item-row')];
+    if (!rows.length || rows.some((row) => !row.querySelector('[data-field="name"]').value.trim())) return '请先加入至少一个产品并填写型号。';
+  }
+  if (stage === 2 && !$('#quote-form').elements.namedItem('customer').value.trim()) return '请选择常用客户或填写客户名称。';
+  return '';
+}
+document.querySelectorAll('[data-step-go]').forEach((button) => button.onclick = () => {
+  const target = Number(button.dataset.stepGo);
+  for (let stage = activeQuoteStage; stage < target; stage += 1) {
+    const error = validateQuoteStage(stage);
+    if (error) { $('#quote-state').textContent = error; return; }
+  }
+  showQuoteStage(target);
+});
+$('#quote-prev').onclick = () => showQuoteStage(activeQuoteStage - 1);
+$('#quote-next').onclick = () => {
+  const error = validateQuoteStage(activeQuoteStage);
+  if (error) { $('#quote-state').textContent = error; return; }
+  $('#quote-state').textContent = '';
+  showQuoteStage(activeQuoteStage + 1);
+};
 
 $('#quote-customer-select').onchange = (event) => {
   const customer = event.target._customers?.find((item) => item.id === event.target.value);
@@ -576,16 +616,16 @@ $('#quote-save-customer').onclick = async () => {
 };
 $('#quote-import-chat').onclick = async () => {
   if (!chatHistory.length && !selectedQuoteProducts.size) { $('#quote-state').textContent = '请先在 AI 对话中检索并勾选产品，或说明客户和产品信息。'; return; }
-  const button = $('#quote-import-chat'); button.disabled = true; $('#quote-state').textContent = '正在从当前对话整理单据草稿…';
+  const button = $('#quote-import-chat'); button.disabled = true; $('#quote-state').textContent = '正在读取已选产品资料…';
   try {
-    const response = await fetch('/api/quotes/from-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document_type: $('#quote-form').elements.namedItem('document_type').value, model_id: $('#chat-model-select').value || 'local', history: chatHistory, selected_products: [...selectedQuoteProducts.keys()] }) });
+    const response = await fetch('/api/quotes/from-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document_type: $('#quote-form').elements.namedItem('document_type').value, currency: $('#quote-form').elements.namedItem('currency').value, model_id: $('#chat-model-select').value || 'local', history: chatHistory, selected_products: [...selectedQuoteProducts.keys()] }) });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || '无法整理对话内容');
     const draft = data.draft;
     const current = quotePayload();
-    const merged = { ...draft, document_type: current.document_type, template_name: current.template_name, company_name: current.company_name, company_contact: current.company_contact, currency: current.currency, quote_date: current.quote_date, incoterm: current.incoterm, payment_terms: current.payment_terms, payment_note: current.payment_note, shipping_term: current.shipping_term, tax_term: current.tax_term, tax_amount: current.tax_amount, tax_note: current.tax_note, shipping: current.shipping, other_fees: current.other_fees, delivery_time: draft.delivery_time || current.delivery_time, bank_details: draft.bank_details || current.bank_details, customer: draft.customer || current.customer, customer_address: draft.customer_address || current.customer_address, valid_until: draft.valid_until || current.valid_until, items: draft.items?.length ? draft.items : current.items };
+    const merged = { ...draft, document_type: current.document_type, template_name: current.template_name, company_name: current.company_name, company_contact: current.company_contact, currency: current.currency, quote_date: current.quote_date, exchange_rate: current.exchange_rate, exchange_date: current.exchange_date, origin_port: current.origin_port, destination_port: current.destination_port, insurance_term: current.insurance_term, incoterm: current.incoterm, payment_terms: current.payment_terms, payment_note: current.payment_note, shipping_term: current.shipping_term, tax_term: current.tax_term, tax_amount: current.tax_amount, tax_note: current.tax_note, shipping: current.shipping, other_fees: current.other_fees, delivery_time: draft.delivery_time || current.delivery_time, bank_details: draft.bank_details || current.bank_details, customer: draft.customer || current.customer, customer_address: draft.customer_address || current.customer_address, valid_until: draft.valid_until || current.valid_until, items: draft.items?.length ? draft.items : current.items };
     fillQuoteForm(merged);
-    $('#quote-state').textContent = '已从对话提取草稿。请逐项核对，尤其是标记需核对的价格，再保存或生成。';
+    $('#quote-state').textContent = '产品已导入。请核对单价、数量和规格后继续。';
   } catch (error) { $('#quote-state').textContent = error.message || '整理失败'; }
   finally { button.disabled = false; }
 };
