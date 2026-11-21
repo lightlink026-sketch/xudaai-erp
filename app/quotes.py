@@ -68,6 +68,10 @@ def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
             "configuration": str(raw.get("configuration", "")).strip()[:1000],
             "colors": str(raw.get("colors", "")).strip()[:1000],
             "size_breakdown": str(raw.get("size_breakdown", "")).strip()[:1000],
+            "carton_spec": str(raw.get("carton_spec", "")).strip()[:200],
+            "carton_volume": str(raw.get("carton_volume", "")).strip()[:100],
+            "gross_weight": str(raw.get("gross_weight", "")).strip()[:100],
+            "net_weight": str(raw.get("net_weight", "")).strip()[:100],
             "moq": str(moq),
             "quantity": str(quantity),
             "unit": str(raw.get("unit", "pcs")).strip()[:30] or "pcs",
@@ -222,7 +226,7 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
     if template_path and template_path.is_file():
         from docx import Document
         template = Document(str(template_path))
-        items_text = "\n".join(f"{i}. {item['name']} | {item.get('description') or ''} | {item.get('colors') or ''} | {item.get('size_breakdown') or ''} | {item.get('configuration') or ''} | {item['quantity']} {item['unit']} × {item['unit_price']} = {item['amount']} {data['currency']}" for i, item in enumerate(data["items"], 1))
+        items_text = "\n".join(f"{i}. {item['name']} | {item.get('description') or ''} | {item.get('colors') or ''} | {item.get('size_breakdown') or ''} | {item.get('configuration') or ''} | {word('箱规', 'Carton')}: {item.get('carton_spec') or '—'} | {word('单箱体积', 'Volume/carton')}: {item.get('carton_volume') or '—'} | {word('毛重', 'Gross weight')}: {item.get('gross_weight') or '—'} | {word('净重', 'Net weight')}: {item.get('net_weight') or '—'} | {item['quantity']} {item['unit']} × {item['unit_price']} = {item['amount']} {data['currency']}" for i, item in enumerate(data["items"], 1))
         values = {
             "quote_no": quote_no, "document_no": quote_no, "customer": data.get("customer", ""),
             "customer_address": data.get("customer_address", ""), "quote_date": data.get("quote_date", ""),
@@ -281,6 +285,14 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
             details += f"\n{word('颜色/颜色数量', 'Colors / Color Qty.')}: {item['colors']}"
         if item.get("size_breakdown"):
             details += f"\n{word('尺码配比', 'Size Breakdown')}: {item['size_breakdown']}"
+        for key, zh_label, en_label in (
+            ("carton_spec", "箱规", "Carton dimensions"),
+            ("carton_volume", "单箱体积", "Volume per carton"),
+            ("gross_weight", "毛重", "Gross weight"),
+            ("net_weight", "净重", "Net weight"),
+        ):
+            if item.get(key):
+                details += f"\n{word(zh_label, en_label)}: {item[key]}"
         if Decimal(item.get("moq", "0")) > 0:
             details += f"\nMOQ: {item['moq']} {item['unit']}"
         rows.append([
