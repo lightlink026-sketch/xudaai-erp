@@ -190,10 +190,13 @@ $('#workspace-upload').onchange = async (event) => {
       const sheets = files.filter((file) => /\.(csv|xlsx|xlsm)$/i.test(file.name));
       const otherFiles = files.filter((file) => !sheets.includes(file));
       for (const file of sheets) {
-        const form = new FormData(); form.set('file', file);
+        const form = new FormData(); form.set('file', file); form.set('model_id', $('#chat-model-select')?.value || '');
         const response = await fetch('/api/business/freight/import', { method: 'POST', body: form });
         const data = await response.json(); if (!response.ok) throw new Error(`${file.name}：${data.detail || '导入失败'}`);
-        summaries.push(`已从 ${data.source_file} 导入 ${data.imported} 条规则；货代：${(data.carriers || []).join('、') || '按文件名归类'}；工作表：${(data.sheets || []).join('、') || '默认表'}。${data.needs_review ? `${data.needs_review} 条计价方式需人工确认。` : '计价规则已分类，可分别计算或对比。'}`);
+        if (data.ai_review) {
+          summaries.push(data.message || `AI 已识别 ${data.draft_rates?.length || 0} 条候选费率，等待确认。`);
+          renderFreightImportDraft(reply, data);
+        } else summaries.push(`已从 ${data.source_file} 导入 ${data.imported} 条规则；货代：${(data.carriers || []).join('、') || '按文件名归类'}；工作表：${(data.sheets || []).join('、') || '默认表'}。${data.needs_review ? `${data.needs_review} 条计价方式需人工确认。` : '计价规则已分类，可分别计算或对比。'}`);
       }
       if (otherFiles.length) {
         const form = new FormData(); otherFiles.forEach((file) => form.append('files', file)); form.append('folder', '运费资料');
@@ -219,6 +222,15 @@ $('#workspace-upload').onchange = async (event) => {
   } catch (error) { reply.querySelector('.message-text').textContent = error.message; }
   finally { event.target.value = ''; }
 };
+
+function renderFreightImportDraft(bubble, data) {
+  const body = bubble.querySelector('.message-body');
+  const card = document.createElement('section');
+  card.className = 'assistant-action-card freight-import-review';
+  const rows = (data.draft_rates || []).slice(0, 80);
+  card.innerHTML = `<b>AI 费率识别预览 · ${rows.length}${(data.draft_rates || []).length > rows.length ? '（仅预览前 80 条）' : ''} 条</b><div class="freight-review-table"><table><thead><tr><th>货代 / 渠道</th><th>目的地</th><th>计价与公式</th><th>来源</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(r.carrier)}<br>${esc(r.channel)}</td><td>${esc(r.destination)}</td><td>${esc(r.formula_summary)}<br><small>${esc(r.calculation_type)} · ${esc(r.currency)}</small></td><td>${esc(r.source_sheet)} · 第 ${esc(r.source_row)} 行</td></tr>`).join('')}</tbody></table></div>${(data.review_notes || []).length ? `<p>待核对：${esc(data.review_notes.join('；'))}</p>` : '<p>AI 提取的费率尚未生效。确认后将保存到团队共享资料库。</p>'}<div><button type="button" class="primary" data-confirm-freight-import="${esc(data.draft_id)}">确认并保存规则</button><button type="button" class="secondary" data-cancel-freight-import="${esc(data.draft_id)}">取消</button></div>`;
+  body.append(card);
+}
 $('#manage-team-rules').onclick = async () => { await loadTeamRules(); $('#rules-dialog').showModal(); };
 $('#close-rules').onclick = () => $('#rules-dialog').close();
 $('#rules-dialog').onclick = (event) => { if (event.target === $('#rules-dialog')) $('#rules-dialog').close(); };
@@ -352,6 +364,28 @@ function renderReferences(bubble, data) {
 }
 
 $('#chat-thread').addEventListener('click', async (event) => {
+  const confirmFreight = event.target.closest('[data-confirm-freight-import], [data-cancel-freight-import]');
+  if (confirmFreight) {
+    const draftId = confirmFreight.dataset.confirmFreightImport || confirmFreight.dataset.cancelFreightImport;
+    const confirm = Boolean(confirmFreight.dataset.confirmFreightImport);
+    confirmFreight.disabled = true;
+    try {
+      const response = await fetch('/api/business/freight/import-confirm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft_id: draftId, confirm }) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.detail || '保存费率失败');
+      const card = confirmFreight.closest('.assistant-action-card');
+      card.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+      card.querySelector('span')?.remove();
+      const status = document.createElement('p'); status.textContent = data.message; card.append(status);
+      await appendWorkspaceMessage('freight', data.message);
+      rememberWorkspaceState();
+    } catch (error) {
+      confirmFreight.disabled = false;
+      let status = confirmFreight.closest('.assistant-action-card').querySelector('.freight-import-error');
+      if (!status) { status = document.createElement('p'); status.className = 'freight-import-error'; confirmFreight.closest('.assistant-action-card').append(status); }
+      status.textContent = error.message;
+    }
+    return;
+  }
   const openRecord = event.target.closest('[data-open-quote-record]');
   if (openRecord) {
     try {

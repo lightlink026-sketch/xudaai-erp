@@ -63,6 +63,9 @@ def init_business_store() -> None:
                     id VARCHAR(40) PRIMARY KEY, actor VARCHAR(120) NOT NULL DEFAULT '', action VARCHAR(80) NOT NULL,
                     entity VARCHAR(80) NOT NULL, entity_id VARCHAR(40) NOT NULL DEFAULT '', detail TEXT NOT NULL,
                     created_at VARCHAR(40) NOT NULL)"""))
+                c.execute(text("""CREATE TABLE IF NOT EXISTS freight_import_drafts (
+                    id VARCHAR(40) PRIMARY KEY, source_file VARCHAR(240) NOT NULL, payload TEXT NOT NULL,
+                    created_at VARCHAR(40) NOT NULL, created_by VARCHAR(120) NOT NULL DEFAULT '')"""))
             return
         except Exception:
             if DATABASE_URL.startswith("sqlite:") or attempt == 29:
@@ -100,6 +103,63 @@ def list_records(kind: str, query: str = "", limit: int = 500) -> list[dict[str,
             "kind": kind, "q": query, "like": f"%{query}%", "limit": max(1, min(limit, 5000)),
         }).fetchall()
     return [_decode(row) for row in rows]
+
+
+def search_freight_rates(query: str = "", limit: int = 100) -> list[dict[str, Any]]:
+    """Search shared freight rules by the words users actually type in chat."""
+    records = list_records("freight_rate", limit=5000)
+    q = query.casefold()
+    if not q:
+        return records[:max(1, min(limit, 500))]
+    # Destination cells often contain a country group separated by punctuation.
+    # Prefer matching individual country names so a sentence like “compare
+    # Poland air freight” returns every route row for Poland.
+    all_country_parts = {
+        part.strip().casefold()
+        for record in records
+        for part in re.split(r"[、，,;/|\s]+", str(record["data"].get("destination", "")))
+        if len(part.strip()) >= 2
+    }
+    mentioned_destinations = [part for part in all_country_parts if part in q]
+    found = []
+    for record in records:
+        data = record["data"]
+        destination = str(data.get("destination", ""))
+        haystack = " ".join(str(data.get(k, "")) for k in ("name", "carrier", "channel", "destination", "method", "source_file")).casefold()
+        country_parts = [part.strip().casefold() for part in re.split(r"[、，,;/|\s]+", destination) if len(part.strip()) >= 2]
+        country_match = any(part in q for part in country_parts)
+        known_channel_tokens = [token for token in ("ups", "dhl", "fedex", "tnt", "空派", "海运", "小包", "卡航") if token in q]
+        channel_match = not known_channel_tokens or any(token in haystack for token in known_channel_tokens)
+        query_terms = [term for term in re.findall(r"[a-z0-9][a-z0-9._-]{1,}|[\u4e00-\u9fff]{2,}", q) if term not in {"运费", "计算", "查询", "比较", "报价", "所有", "渠道", "货代", "各家", "分别", "帮我", "一下"}]
+        term_match = any(term in haystack for term in query_terms)
+        if ((country_match if mentioned_destinations else term_match) and channel_match):
+            found.append(record)
+    return found[:max(1, min(limit, 500))]
+
+
+def save_freight_import_draft(source_file: str, rates: list[dict[str, Any]], actor: str = "") -> str:
+    draft_id = uuid.uuid4().hex
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO freight_import_drafts(id,source_file,payload,created_at,created_by) VALUES(:id,:source,:payload,:created,:actor)"), {
+            "id": draft_id, "source": source_file[:240], "payload": json.dumps(rates, ensure_ascii=False, default=str),
+            "created": _now(), "actor": actor[:120],
+        })
+    return draft_id
+
+
+def get_freight_import_draft(draft_id: str) -> dict[str, Any] | None:
+    with engine.begin() as c:
+        row = c.execute(text("SELECT * FROM freight_import_drafts WHERE id=:id"), {"id": draft_id}).fetchone()
+    if not row:
+        return None
+    result = dict(row._mapping)
+    result["rates"] = json.loads(result.pop("payload"))
+    return result
+
+
+def delete_freight_import_draft(draft_id: str) -> None:
+    with engine.begin() as c:
+        c.execute(text("DELETE FROM freight_import_drafts WHERE id=:id"), {"id": draft_id})
 
 
 def get_record(record_id: str) -> dict[str, Any] | None:
@@ -216,7 +276,7 @@ def save_conversation(conversation_id: str, workspace: str, messages: list[dict[
                     "items": [{"name": str(item.get("name", ""))[:200], "description": str(item.get("description", ""))[:500], "configuration": str(item.get("configuration", ""))[:500], "colors": str(item.get("colors", ""))[:300], "size_breakdown": str(item.get("size_breakdown", ""))[:300], "carton_spec": str(item.get("carton_spec", ""))[:200], "units_per_carton": str(item.get("units_per_carton", ""))[:40], "carton_quantity": str(item.get("carton_quantity", ""))[:40], "carton_volume": str(item.get("carton_volume", ""))[:100], "gross_weight": str(item.get("gross_weight", ""))[:100], "net_weight": str(item.get("net_weight", ""))[:100], "moq": str(item.get("moq", ""))[:40], "quantity": str(item.get("quantity", ""))[:40], "unit": str(item.get("unit", ""))[:30], "unit_price": str(item.get("unit_price", ""))[:40], "amount": str(item.get("amount", ""))[:40], "source": str(item.get("source", ""))[:500]} for item in items[:50] if isinstance(item, dict)],
                 })
             action = message.get("proposed_action")
-            if isinstance(action, dict) and action.get("type") in {"customer.save", "customer.delete", "freight_rate.save", "freight.calculate", "freight.compare", "salesperson.save", "salesperson.delete", "order.save", "commission_rule.save", "payroll.calculate", "rule.save", "quote.draft", "pi.draft"} and isinstance(action.get("data"), dict):
+            if isinstance(action, dict) and action.get("type") in {"customer.save", "customer.delete", "freight_rate.save", "freight_rate.delete", "freight.calculate", "freight.compare", "salesperson.save", "salesperson.delete", "order.save", "commission_rule.save", "payroll.calculate", "rule.save", "quote.draft", "pi.draft"} and isinstance(action.get("data"), dict):
                 safe["proposed_action"] = {"type": action["type"], "data": action["data"]}
         safe_messages.append(safe)
     if not safe_messages:
@@ -541,7 +601,9 @@ def import_freight_rows(filename: str, content: bytes, actor: str = "") -> list[
             data["calculation_type"] = "first_renewal" if data.get("first_weight") and data.get("first_price") and data.get("additional_weight") and data.get("additional_price") else "unit_rate"
             if data["calculation_type"] == "first_renewal" and not data["rate_unit"]:
                 data["rate_unit"] = "kg"
-            data["classification_status"] = "confirmed_from_table" if data["rate_unit"] in {"kg", "cbm", "carton", "shipment"} else "needs_review"
+            data["classification_status"] = "confirmed_from_table" if data["rate_unit"] in {"kg", "cbm", "carton", "shipment", "parcel_weight"} else "needs_review"
+            if data["classification_status"] == "needs_review":
+                continue
             data["formula_summary"] = (f"首重 {data.get('first_weight')} kg/{data.get('first_price')}，续重每 {data.get('additional_weight')} kg/{data.get('additional_price')}" if data["calculation_type"] == "first_renewal" else f"按 {data['rate_unit']} 计价；单价 {data.get('rate')}；最低收费 {data.get('minimum_charge', 0)}；固定费 {data.get('fixed_fee', 0)}；每箱费 {data.get('per_carton_fee', 0)}")
             data["name"] = " / ".join(str(data.get(k, "")) for k in ("carrier", "channel", "origin", "destination", "method", "rate_unit", "rate") if str(data.get(k, ""))) or f"{filename} 第 {source_row} 行"
             key = (sheet_name, source_row)
@@ -554,6 +616,55 @@ def import_freight_rows(filename: str, content: bytes, actor: str = "") -> list[
             if (str(record["data"].get("source_sheet", "")), int(record["data"].get("source_row", -1))) not in seen_rows:
                 delete_record(record["id"], actor)
     return saved
+
+
+def freight_workbook_text(filename: str, content: bytes, max_chars: int = 28000) -> str:
+    """Render an unfamiliar freight workbook as bounded, row-numbered data for AI extraction."""
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".csv":
+        rows = list(csv.reader(io.StringIO(content.decode("utf-8-sig", errors="replace"))))
+        sheets = [(Path(filename).stem, rows)]
+    elif suffix in {".xlsx", ".xlsm"}:
+        from openpyxl import load_workbook
+        workbook = load_workbook(io.BytesIO(content), read_only=False, data_only=True)
+        sheets = []
+        for sheet in workbook.worksheets:
+            # Expand merged headings into visible values before sending rows.
+            merged_values: dict[tuple[int, int], Any] = {}
+            for merged in sheet.merged_cells.ranges:
+                top = sheet.cell(merged.min_row, merged.min_col).value
+                if top is not None:
+                    for row_idx in range(merged.min_row, merged.max_row + 1):
+                        for col_idx in range(merged.min_col, merged.max_col + 1):
+                            merged_values[(row_idx, col_idx)] = top
+            rendered = []
+            for row_idx, row in enumerate(sheet.iter_rows(values_only=False), 1):
+                values = [cell.value if cell.value is not None else merged_values.get((row_idx, cell.column)) for cell in row[:40]]
+                while values and values[-1] is None:
+                    values.pop()
+                if any(value is not None for value in values):
+                    rendered.append((row_idx, values))
+            sheets.append((sheet.title, rendered))
+    else:
+        raise ValueError("运费表请上传 CSV 或 XLSX 文件")
+    parts = []
+    remaining = max_chars
+    for sheet_name, rows in sheets:
+        lines = [f"工作表：{sheet_name}"]
+        for item in rows[:500]:
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], int):
+                row_idx, values = item
+            else:
+                row_idx, values = len(lines), item
+            line = f"{row_idx}: " + " | ".join("" if value is None else str(value).replace("\n", " / ")[:240] for value in values)
+            lines.append(line)
+        block = "\n".join(lines)
+        if len(block) > remaining:
+            parts.append(block[:max(0, remaining)] + "\n[后续行因长度限制省略]")
+            break
+        parts.append(block)
+        remaining -= len(block)
+    return "\n\n".join(parts)
 
 
 def import_customer_rows(filename: str, content: bytes, actor: str = "") -> list[dict[str, Any]]:
