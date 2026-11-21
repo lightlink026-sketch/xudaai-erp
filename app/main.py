@@ -894,7 +894,7 @@ async def answer(payload: dict[str, Any]):
 
 def image_matches(query_image: Image.Image, limit: int = 50, min_similarity: float = 0.0) -> dict[str, Any]:
     query_hash = imagehash.phash(query_image)
-    min_similarity = max(0.0, min(0.8, min_similarity))
+    min_similarity = max(0.0, min(0.95, min_similarity))
     results = []
     mode = os.getenv("IMAGE_SEARCH_MODE", "phash").lower()
     if mode == "clip":

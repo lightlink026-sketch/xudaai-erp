@@ -20,7 +20,7 @@
         </div>
         <form id="chat-form" class="chat-composer">
           <div id="chat-attachment" class="chat-attachment" hidden></div>
-          <div id="chat-image-options" class="chat-image-options" hidden><label for="image-threshold">图片最低相似度 <input id="image-threshold" type="range" min="0" max="0.60" step="0.05" value="0.20"><output id="image-threshold-value">0.20</output></label><small>调低会显示更多候选；调高筛选更严格。分数不是准确率百分比。</small></div>
+          <div id="chat-image-options" class="chat-image-options" hidden><label for="image-threshold">图片最低相似度 <input id="image-threshold" type="range" min="0" max="0.95" step="0.05" value="0.20"><output id="image-threshold-value">0.20</output></label><small>调低会显示更多候选；调高筛选更严格。分数是图像向量相似度，不是识别准确率。</small></div>
           <textarea id="chat-message" name="message" rows="2" placeholder="输入产品型号、问题，或说明你想从图片中查什么…"></textarea>
           <div class="composer-actions"><label class="attach-button" title="附加产品图片">＋ 图片<input id="chat-image" type="file" accept="image/*" hidden></label><label class="chat-model-choice"><span>本轮模型</span><select id="chat-model-select" aria-label="选择本轮使用的模型"><option value="local">仅本地检索</option></select></label><span class="composer-hint">可只发图片；回答会附资料来源</span><button type="button" id="open-quote-dialog" class="secondary">报价 / PI</button><button id="chat-send" class="primary">发送 <span>↑</span></button></div>
         </form>
