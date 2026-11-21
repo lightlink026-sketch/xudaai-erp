@@ -1,11 +1,15 @@
 services:
   xudaai-library:
-    build: .
+    build:
+      context: .
+      args:
+        ENABLE_CLIP: ${ENABLE_CLIP:-0}
     container_name: xudaai-library
     env_file: .env
     ports:
-      - "8000:8000"
+      - "${APP_PORT:-8000}:8000"
     volumes:
-      - ./data:/srv/app/data
-      - ./library:/srv/app/library:ro
+      - ${APP_DATA_HOST_PATH:-./data}:/srv/app/data
+      - ${LIBRARY_HOST_PATH:-./library}:/srv/app/library
+      - ${MODEL_CACHE_HOST_PATH:-./model-cache}:/root/.cache
     restart: unless-stopped

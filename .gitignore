@@ -2,6 +2,7 @@
 data/*
 !data/.gitkeep
 library/
+model-cache/
 __pycache__/
 *.py[cod]
 .venv/

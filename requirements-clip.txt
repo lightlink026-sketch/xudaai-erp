@@ -1,0 +1,2 @@
+# Optional semantic image similarity; pulls PyTorch and model dependencies.
+open_clip_torch>=2.26,<3

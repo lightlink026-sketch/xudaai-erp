@@ -4,6 +4,8 @@ import hashlib
 import hmac
 import io
 import json
+import asyncio
+import json
 import os
 import re
 import sqlite3
@@ -20,16 +22,22 @@ from openpyxl import load_workbook
 from PIL import Image
 from pptx import Presentation
 from pypdf import PdfReader
+import httpx
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
 LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", "./library")).resolve()
 DB_PATH = DATA_DIR / "library.sqlite3"
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024
+SYNC_INTERVAL = max(0, int(os.getenv("SYNC_INTERVAL_SECONDS", "300")))
 SUPPORTED = {".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
 app = FastAPI(title="Xudaai Product Library", version="0.1.0")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+_sync_task: asyncio.Task | None = None
+_clip_model: Any = None
+_clip_preprocess: Any = None
+_clip_torch: Any = None
 
 
 def db() -> sqlite3.Connection:
@@ -56,6 +64,27 @@ def init_db() -> None:
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(content, file_id UNINDEXED, page UNINDEXED, tokenize='unicode61');
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         """)
+        file_columns = {row[1] for row in c.execute("PRAGMA table_info(files)")}
+        if "image_embedding" not in file_columns:
+            c.execute("ALTER TABLE files ADD COLUMN image_embedding TEXT")
+
+
+def visual_embedding(image: Image.Image) -> list[float]:
+    global _clip_model, _clip_preprocess, _clip_torch
+    if _clip_model is None:
+        try:
+            import open_clip
+            import torch
+        except ImportError as e:
+            raise RuntimeError("CLIP mode needs the optional open_clip_torch package") from e
+        _clip_model, _, _clip_preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="laion2b_s34b_b79k")
+        _clip_torch = torch
+        _clip_model.eval()
+    with _clip_torch.no_grad():
+        tensor = _clip_preprocess(image.convert("RGB")).unsqueeze(0)
+        vector = _clip_model.encode_image(tensor)
+        vector = vector / vector.norm(dim=-1, keepdim=True)
+    return vector.cpu().float().tolist()[0]
 
 
 def sha256(path: Path) -> str:
@@ -105,22 +134,26 @@ def index_one(path: Path, rel: str) -> dict[str, Any]:
     st = path.stat()
     digest = sha256(path)
     with db() as c:
-        old = c.execute("SELECT id,sha256 FROM files WHERE path=?", (rel,)).fetchone()
-        if old and old["sha256"] == digest:
+        old = c.execute("SELECT id,sha256,image_embedding FROM files WHERE path=?", (rel,)).fetchone()
+        needs_embedding = path.suffix.lower() in IMAGE_TYPES and os.getenv("IMAGE_SEARCH_MODE", "phash").lower() == "clip"
+        if old and old["sha256"] == digest and not (needs_embedding and not old["image_embedding"]):
             return {"path": rel, "status": "unchanged"}
         try:
             extracted = extract(path)
             ih = None
+            embedding = None
             if path.suffix.lower() in IMAGE_TYPES:
                 with Image.open(path) as im:
                     ih = str(imagehash.phash(im.convert("RGB")))
+                    if os.getenv("IMAGE_SEARCH_MODE", "phash").lower() == "clip":
+                        embedding = json.dumps(visual_embedding(im), separators=(",", ":"))
             if old:
                 fid = old["id"]
                 c.execute("DELETE FROM chunks_fts WHERE file_id=?", (fid,))
                 c.execute("DELETE FROM chunks WHERE file_id=?", (fid,))
-                c.execute("UPDATE files SET name=?,ext=?,size=?,mtime=?,sha256=?,status='ready',error=NULL,indexed_at=?,image_hash=? WHERE id=?", (path.name,path.suffix.lower(),st.st_size,st.st_mtime,digest,datetime.now(timezone.utc).isoformat(),ih,fid))
+                c.execute("UPDATE files SET name=?,ext=?,size=?,mtime=?,sha256=?,status='ready',error=NULL,indexed_at=?,image_hash=?,image_embedding=? WHERE id=?", (path.name,path.suffix.lower(),st.st_size,st.st_mtime,digest,datetime.now(timezone.utc).isoformat(),ih,embedding,fid))
             else:
-                cur = c.execute("INSERT INTO files(path,name,ext,size,mtime,sha256,status,indexed_at,image_hash) VALUES(?,?,?,?,?,?,'ready',?,?)", (rel,path.name,path.suffix.lower(),st.st_size,st.st_mtime,digest,datetime.now(timezone.utc).isoformat(),ih))
+                cur = c.execute("INSERT INTO files(path,name,ext,size,mtime,sha256,status,indexed_at,image_hash,image_embedding) VALUES(?,?,?,?,?,?,'ready',?,?,?)", (rel,path.name,path.suffix.lower(),st.st_size,st.st_mtime,digest,datetime.now(timezone.utc).isoformat(),ih,embedding))
                 fid = cur.lastrowid
             for page, body in extracted:
                 for part in split_text(body):
@@ -141,7 +174,7 @@ def sync_library() -> dict[str, Any]:
     seen: set[str] = set()
     results = []
     for p in LIBRARY_DIR.rglob("*"):
-        if p.is_file() and p.suffix.lower() in SUPPORTED:
+        if p.is_file() and not p.is_symlink() and p.suffix.lower() in SUPPORTED:
             rel = p.relative_to(LIBRARY_DIR).as_posix()
             seen.add(rel)
             results.append(index_one(p, rel))
@@ -169,6 +202,29 @@ def startup() -> None:
     init_db()
 
 
+async def periodic_sync() -> None:
+    while True:
+        await asyncio.sleep(SYNC_INTERVAL)
+        try:
+            await asyncio.to_thread(sync_library)
+        except Exception:
+            # A later cycle retries; manual sync exposes per-file errors to the UI.
+            continue
+
+
+@app.on_event("startup")
+async def start_periodic_sync() -> None:
+    global _sync_task
+    if SYNC_INTERVAL:
+        _sync_task = asyncio.create_task(periodic_sync())
+
+
+@app.on_event("shutdown")
+async def stop_periodic_sync() -> None:
+    if _sync_task:
+        _sync_task.cancel()
+
+
 @app.get("/", response_class=HTMLResponse)
 def home() -> str:
     return (ROOT / "static" / "index.html").read_text(encoding="utf-8")
@@ -180,12 +236,38 @@ def status() -> dict[str, Any]:
         total = c.execute("SELECT COUNT(*) FROM files").fetchone()[0]
         errs = c.execute("SELECT COUNT(*) FROM files WHERE status='error'").fetchone()[0]
         latest = c.execute("SELECT MAX(indexed_at) FROM files").fetchone()[0]
-    return {"library_dir": str(LIBRARY_DIR), "total_files": total, "errors": errs, "last_indexed": latest, "dingtalk_enabled": os.getenv("DINGTALK_ENABLED", "false").lower() == "true"}
+    return {"library_dir": str(LIBRARY_DIR), "total_files": total, "errors": errs, "last_indexed": latest, "sync_interval_seconds": SYNC_INTERVAL, "dingtalk_enabled": os.getenv("DINGTALK_ENABLED", "false").lower() == "true", "answer_enabled": bool(os.getenv("OPENAI_API_KEY"))}
 
 
 @app.post("/api/index/sync")
 def sync() -> dict[str, Any]:
     return sync_library()
+
+
+@app.post("/api/files/upload")
+async def upload_files(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    """Store user-uploaded materials under the configured library, then index them."""
+    LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
+    saved = []
+    total_bytes = 0
+    for item in files[:100]:
+        safe_name = Path(item.filename or "upload.bin").name
+        ext = Path(safe_name).suffix.lower()
+        if ext not in SUPPORTED:
+            saved.append({"name": safe_name, "status": "skipped", "error": "Unsupported file type"})
+            continue
+        content = await item.read(MAX_UPLOAD + 1)
+        total_bytes += len(content)
+        if len(content) > MAX_UPLOAD or total_bytes > MAX_UPLOAD * 4:
+            raise HTTPException(413, "Upload limit exceeded")
+        dest = LIBRARY_DIR / safe_name
+        if not dest.resolve().is_relative_to(LIBRARY_DIR):
+            raise HTTPException(400, "Invalid filename")
+        if dest.exists():
+            dest = dest.with_name(f"{dest.stem}_{hashlib.sha256(content).hexdigest()[:8]}{dest.suffix}")
+        dest.write_bytes(content)
+        saved.append(index_one(dest, dest.relative_to(LIBRARY_DIR).as_posix()))
+    return {"files": saved, "uploaded": sum(x["status"] == "indexed" for x in saved)}
 
 
 @app.post("/api/search/text")
@@ -199,23 +281,67 @@ def text_search(q: str = Form(...), limit: int = Form(8)) -> dict[str, Any]:
     return {"query": q, "results": [{"file_id":r["file_id"],"name":r["name"],"path":r["path"],"ext":r["ext"],"page":r["page"],"snippet":r["content"][:700],"preview_url":f"/api/files/{r['file_id']}/preview" if r["ext"] in IMAGE_TYPES else None} for r in rows]}
 
 
+@app.post("/api/answer")
+async def answer(payload: dict[str, Any]):
+    """Answer from indexed citations using an OpenAI-compatible Chat Completions API."""
+    question = str(payload.get("question", "")).strip()
+    if not question:
+        raise HTTPException(400, "Question is required")
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        raise HTTPException(503, "AI answer is not configured. Set OPENAI_API_KEY or use /api/search/text.")
+    found = text_search(q=question, limit=8)["results"]
+    if not found:
+        return {"answer": "在当前已索引资料中没有找到可靠依据。", "sources": []}
+    context = "\n\n".join(f"[来源 {i+1}] 文件：{x['path']}；页码：{x['page'] or '未标注'}\n{x['snippet']}" for i,x in enumerate(found))
+    base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    try:
+        async with httpx.AsyncClient(timeout=90) as client:
+            response = await client.post(f"{base}/chat/completions", headers={"Authorization": f"Bearer {api_key}"}, json={"model": model, "temperature": 0.1, "messages": [{"role": "system", "content": "你是产品资料助手。只能依据用户提供的资料片段回答，不要补充片段中没有的产品事实。若资料不足，明确说明。回答末尾列出引用来源编号。"}, {"role": "user", "content": f"资料片段：\n{context}\n\n问题：{question}"}]})
+            response.raise_for_status()
+            answer_text = response.json()["choices"][0]["message"]["content"]
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"Model service returned HTTP {e.response.status_code}")
+    except (httpx.HTTPError, KeyError, IndexError, TypeError):
+        raise HTTPException(502, "Could not get a valid answer from the configured model service")
+    return {"answer": answer_text, "sources": found, "model": model}
+
+
 @app.post("/api/search/image")
 async def image_search(image: UploadFile = File(...), limit: int = Form(12)) -> dict[str, Any]:
     raw = await image.read(MAX_UPLOAD + 1)
     if len(raw) > MAX_UPLOAD:
         raise HTTPException(413, f"Image exceeds {MAX_UPLOAD // 1024 // 1024} MB")
     try:
-        query_hash = imagehash.phash(Image.open(io.BytesIO(raw)).convert("RGB"))
+        query_image = Image.open(io.BytesIO(raw)).convert("RGB")
+        query_hash = imagehash.phash(query_image)
     except Exception:
         raise HTTPException(400, "Unsupported or invalid image")
-    with db() as c:
-        rows = c.execute("SELECT id,name,path,image_hash FROM files WHERE image_hash IS NOT NULL AND status='ready'").fetchall()
     results = []
-    for row in rows:
-        distance = query_hash - imagehash.hex_to_hash(row["image_hash"])
-        results.append({"file_id":row["id"],"name":row["name"],"path":row["path"],"distance":distance,"similarity":round(1-distance/64,3),"preview_url":f"/api/files/{row['id']}/preview"})
-    results.sort(key=lambda x:x["distance"])
-    return {"results":results[:max(1,min(limit,50))],"method":"pHash (exact and near-duplicate matching)"}
+    mode = os.getenv("IMAGE_SEARCH_MODE", "phash").lower()
+    if mode == "clip":
+        try:
+            query_vector = visual_embedding(query_image)
+        except RuntimeError as e:
+            raise HTTPException(503, str(e))
+        with db() as c:
+            rows = c.execute("SELECT id,name,path,image_embedding FROM files WHERE image_embedding IS NOT NULL AND status='ready'").fetchall()
+        for row in rows:
+            stored = json.loads(row["image_embedding"])
+            score = sum(a*b for a,b in zip(query_vector,stored))
+            results.append({"file_id":row["id"],"name":row["name"],"path":row["path"],"similarity":round(score,4),"preview_url":f"/api/files/{row['id']}/preview"})
+        results.sort(key=lambda x:x["similarity"],reverse=True)
+        method = "OpenCLIP visual similarity"
+    else:
+        with db() as c:
+            rows = c.execute("SELECT id,name,path,image_hash FROM files WHERE image_hash IS NOT NULL AND status='ready'").fetchall()
+        for row in rows:
+            distance = query_hash - imagehash.hex_to_hash(row["image_hash"])
+            results.append({"file_id":row["id"],"name":row["name"],"path":row["path"],"distance":distance,"similarity":round(1-distance/64,3),"preview_url":f"/api/files/{row['id']}/preview"})
+        results.sort(key=lambda x:x["distance"])
+        method = "pHash near-duplicate matching"
+    return {"results":results[:max(1,min(limit,50))],"method":method}
 
 
 @app.get("/api/files/{file_id}/preview")
