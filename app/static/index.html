@@ -14,7 +14,7 @@
     <header><div><span class="eyebrow">PRODUCT KNOWLEDGE</span><h1 id="page-title">AI 对话</h1></div><div class="header-right"><span class="pill"><i class="dot"></i> 本地运行</span><div class="avatar">X</div></div></header>
     <section class="tab-panel active" id="ask">
       <div class="chat-shell">
-        <div class="chat-intro"><div class="chat-intro-copy"><span class="eyebrow">PRODUCT KNOWLEDGE ASSISTANT</span><h2>产品资料 AI 助手</h2><p>直接提问，或附上一张产品图片。我会检索资料库并列出来源。</p><div class="document-actions"><button type="button" id="start-quote" class="secondary">生成产品报价</button><button type="button" id="start-pi" class="secondary">生成 PI 形式发票</button></div></div><button id="open-model-settings" class="chat-settings-button" type="button"><span>⚙</span><span><b>模型设置</b><small id="chat-model-status">读取中…</small></span></button></div>
+        <div class="chat-intro"><div class="chat-intro-copy"><span class="eyebrow">PRODUCT KNOWLEDGE ASSISTANT</span><h2>产品资料 AI 助手</h2><p>直接提问或附图检索；勾选多个匹配产品后，可整理成报价单或 PI PDF。</p><div class="document-actions"><button type="button" id="start-quote" class="secondary">生成产品报价</button><button type="button" id="start-pi" class="secondary">生成 PI 形式发票</button></div></div><button id="open-model-settings" class="chat-settings-button" type="button"><span>⚙</span><span><b>模型设置</b><small id="chat-model-status">读取中…</small></span></button></div>
         <div id="chat-thread" class="chat-thread" aria-live="polite">
           <div class="chat-welcome"><div class="assistant-mark">✧</div><div><b>你好，我可以帮你查产品资料</b><p>试试问“这个产品有哪些配件？”或上传图片后问“帮我找这款产品的参数”。</p></div></div>
         </div>
@@ -49,26 +49,41 @@
         <p class="model-dialog-intro">可先在 AI 对话中查询产品，再填写并核对单据。系统只按确认后的价格计算金额。</p>
         <div class="quote-card">
           <div class="quote-form-head"><h3 id="quote-form-title">新建单据</h3><span id="quote-number"></span></div>
+          <div id="quote-selected-products" class="quote-selected-products"><span>还没有勾选产品。请先在对话结果中勾选产品图片或资料。</span></div>
           <form id="quote-form">
+            <div class="quote-step-title">第 1 步：产品与数量配置</div>
             <div class="quote-fields">
               <label>单据类型<select name="document_type"><option value="quote">产品报价单</option><option value="pi">PI 形式发票</option></select></label>
               <label>模板<select name="template_name" id="quote-template"><option value="">系统默认模板</option></select></label>
               <label class="template-upload">上传 DOCX 模板<input id="quote-template-upload" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label>
               <label>公司名称<input name="company_name" placeholder="填写公司抬头"></label>
               <label>公司联系方式<input name="company_contact" placeholder="地址、电话、邮箱"></label>
+            </div>
+            <p class="template-hint">DOCX 模板可放在 data/templates（或 TEMPLATES_DIR）目录，也可在这里上传。占位符：{{customer}}、{{quote_no}}、{{items}}、{{subtotal}}、{{total}}、{{payment_terms}}、{{bank_details}}。当前会保留模板段落与表格文字，复杂样式和图片不保证原样。</p>
+            <div class="quote-items-head"><h3>已选产品（可调整颜色/尺码/数量）</h3><button id="quote-add-item" class="secondary" type="button">＋ 添加产品</button></div>
+            <div id="quote-items"></div>
+            <div class="quote-step-title">第 2 步：客户信息</div>
+            <div class="quote-fields">
+              <label>选择已保存客户<select id="quote-customer-select"><option value="">新客户 / 手动填写</option></select></label>
               <label>客户名称<input name="customer" placeholder="买方名称"></label>
               <label>客户地址<input name="customer_address" placeholder="客户地址"></label>
+              <button type="button" class="secondary" id="quote-save-customer">保存为常用客户</button>
+            </div>
+            <div class="quote-step-title">第 3 步：贸易与付款条款</div>
+            <div class="quote-fields">
               <label>报价日期<input name="quote_date" type="date" required></label>
-              <label>有效期至<input name="valid_until" type="date"></label>
+              <label>有效期<select name="valid_days" id="quote-valid-days"><option value="7">7 天</option><option value="15">15 天</option><option value="30" selected>30 天</option><option value="60">60 天</option><option value="90">90 天</option><option value="custom">自定义</option></select><input name="valid_days_custom" type="number" min="1" max="365" value="30" hidden></label>
               <label>币种<select name="currency"><option>USD</option><option>EUR</option><option>CNY</option><option>GBP</option><option>JPY</option></select></label>
-              <label>贸易条款<input name="incoterm" placeholder="例如 EXW / FOB Shenzhen"></label>
-              <label class="quote-wide">付款条款<input name="payment_terms" placeholder="例如 30% 订金，余款发货前支付"></label>
+              <label>贸易条款<select name="incoterm"><option value="EXW">EXW 工厂交货</option><option value="FOB">FOB 装运港船上交货</option><option value="CIF">CIF 成本、保险费加运费</option><option value="CFR">CFR 成本加运费</option><option value="DDP">DDP 完税后交货</option><option value="custom">自定义</option></select><input name="incoterm_custom" placeholder="填写自定义贸易条款" hidden></label>
+              <label>付款方式<select name="payment_terms"><option value="T/T 30% deposit, 70% before shipment">T/T 30% 订金，发货前付清</option><option value="100% T/T before shipment">发货前 100% T/T</option><option value="Letter of Credit at sight">即期信用证</option><option value="PayPal">PayPal</option><option value="custom">自定义</option></select><input name="payment_terms_custom" placeholder="填写自定义付款方式" hidden></label>
+              <label>运费<select name="shipping_term"><option value="Excluded">不含运费</option><option value="Included">含运费</option><option value="Collect">运费到付</option><option value="custom">自定义</option></select><input name="shipping_term_custom" placeholder="自定义运费条款" hidden></label>
+              <label>税费<select name="tax_term"><option value="Excluded">不含税</option><option value="Included">含税</option><option value="N/A">不适用</option><option value="custom">自定义</option></select><input name="tax_term_custom" placeholder="自定义税费条款" hidden></label>
+              <label>税额<input name="tax_amount" type="number" min="0" step="0.01" value="0"></label>
+              <label>税费说明<input name="tax_note" placeholder="如税率或税额已知，可填写说明"></label>
+              <label class="quote-wide">付款条款补充<input name="payment_note" placeholder="例：余款发货前支付"></label>
               <label>交付时间<input name="delivery_time" placeholder="例如 收到订金后 15 天"></label>
               <label class="quote-wide">收款/银行信息<input name="bank_details" placeholder="PI 可填写收款账户信息"></label>
             </div>
-            <p class="template-hint">DOCX 模板可放在 data/templates（或 TEMPLATES_DIR）目录，也可在这里上传。占位符：{{customer}}、{{quote_no}}、{{items}}、{{subtotal}}、{{total}}、{{payment_terms}}、{{bank_details}}。当前会保留模板段落与表格文字，复杂样式和图片不保证原样。</p>
-            <div class="quote-items-head"><h3>产品明细</h3><button id="quote-add-item" class="secondary" type="button">＋ 添加产品</button></div>
-            <div id="quote-items"></div>
             <div class="quote-fields quote-costs">
               <label>运费<input name="shipping" type="number" min="0" step="0.01" value="0"></label>
               <label>其他费用<input name="other_fees" type="number" min="0" step="0.01" value="0"></label>

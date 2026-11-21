@@ -1,0 +1,14 @@
+{
+  "company_name": "Your Company Name",
+  "company_contact": "Address / Phone / Email",
+  "currency": "USD",
+  "incoterm": "FOB",
+  "payment_terms": "T/T 30% deposit, 70% before shipment",
+  "payment_note": "",
+  "shipping_term": "Excluded",
+  "tax_term": "Excluded",
+  "tax_note": "",
+  "delivery_time": "15 days after deposit",
+  "bank_details": "",
+  "template_name": ""
+}

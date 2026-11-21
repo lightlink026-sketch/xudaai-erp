@@ -407,7 +407,7 @@ def quote_defaults_get() -> dict[str, Any]:
 
 @app.put("/api/quotes/defaults")
 async def quote_defaults_put(payload: dict[str, Any]) -> dict[str, Any]:
-    keys = {"company_name", "company_contact", "currency", "incoterm", "payment_terms", "delivery_time", "bank_details", "template_name"}
+    keys = {"company_name", "company_contact", "currency", "incoterm", "payment_terms", "payment_note", "shipping_term", "tax_term", "tax_note", "delivery_time", "bank_details", "template_name"}
     values = {key: str(payload.get(key, "")).strip()[:1000] for key in keys}
     if values.get("currency") and not re.fullmatch(r"[A-Za-z]{3}", values["currency"]):
         raise HTTPException(422, "默认币种请使用三位代码，例如 USD")
@@ -419,6 +419,35 @@ async def quote_defaults_put(payload: dict[str, Any]) -> dict[str, Any]:
     temp.write_text(json.dumps(values, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(path)
     return {"defaults": values}
+
+
+@app.get("/api/quotes/customers")
+def quote_customers_get() -> dict[str, Any]:
+    path = TEMPLATES_DIR / "customers.json"
+    try:
+        values = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+        return {"customers": values if isinstance(values, list) else []}
+    except (OSError, ValueError):
+        return {"customers": []}
+
+
+@app.post("/api/quotes/customers")
+async def quote_customers_put(payload: dict[str, Any]) -> dict[str, Any]:
+    name = str(payload.get("name", "")).strip()[:200]
+    address = str(payload.get("address", "")).strip()[:500]
+    if not name:
+        raise HTTPException(422, "请填写客户名称")
+    TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+    path = TEMPLATES_DIR / "customers.json"
+    try:
+        customers = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+    except (OSError, ValueError):
+        customers = []
+    customers = [item for item in customers if isinstance(item, dict) and str(item.get("name", "")).casefold() != name.casefold()]
+    customer = {"id": uuid.uuid4().hex[:12], "name": name, "address": address}
+    customers.append(customer)
+    path.write_text(json.dumps(customers[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"customer": customer, "customers": customers[-500:]}
 
 
 @app.post("/api/quotes/from-chat")
@@ -436,14 +465,36 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(history, list):
         raise HTTPException(422, "对话记录格式无效")
     conversation = "\n".join(f"{str(item.get('role',''))}: {str(item.get('content',''))[:2000]}" for item in history[-16:] if isinstance(item, dict) and item.get("role") in {"user", "assistant"})[:16000]
-    if not conversation.strip():
-        raise HTTPException(400, "请先在 AI 对话中说明客户和产品，再整理报价/PI")
+    selected_ids = payload.get("selected_products", [])
+    if not isinstance(selected_ids, list):
+        selected_ids = []
+    selected_context = []
+    with db() as c:
+        for raw_id in selected_ids[:20]:
+            try:
+                file_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            file_row = c.execute("SELECT id,name,path,ext FROM files WHERE id=? AND status='ready'", (file_id,)).fetchone()
+            if not file_row:
+                continue
+            if file_row["ext"] in IMAGE_TYPES:
+                related = related_text_for_images([{"file_id": file_id, "path": file_row["path"]}], limit=6)
+                excerpts = [f"{item['path']}: {item['snippet'][:700]}" for item in related]
+            else:
+                rows = c.execute("SELECT content,page FROM chunks WHERE file_id=? ORDER BY id LIMIT 5", (file_id,)).fetchall()
+                excerpts = [f"第 {row['page'] or '未标注'} 页: {row['content'][:700]}" for row in rows]
+            selected_context.append(f"已勾选产品资料：{file_row['path']}\n" + ("\n".join(excerpts) or "该资料没有可读取的文字内容"))
+    if not conversation.strip() and not selected_context:
+        raise HTTPException(400, "请先在 AI 对话中检索并勾选产品资料，或补充对话内容")
     doc_type = "PI" if str(payload.get("document_type", "quote")).lower() == "pi" else "报价单"
-    schema = {"customer":"", "customer_address":"", "quote_date":"", "valid_until":"", "currency":"USD", "incoterm":"", "payment_terms":"", "delivery_time":"", "bank_details":"", "notes":"", "items":[{"name":"", "description":"", "quantity":"1", "unit":"pcs", "unit_price":"0", "discount_percent":"0", "source":"需人工核对"}]}
+    schema = {"customer":"", "customer_address":"", "quote_date":"", "valid_until":"", "currency":"USD", "incoterm":"", "payment_terms":"", "delivery_time":"", "bank_details":"", "notes":"", "items":[{"name":"", "description":"", "configuration":"", "quantity":"1", "unit":"pcs", "unit_price":"0", "discount_percent":"0", "source":"需人工核对"}]}
     instruction = (
-        f"从下面的用户与助手对话整理一份{doc_type}草稿，只能提取明确说出的字段，不得推断客户地址、价格、数量、付款/运费或条款。"
-        "缺失的单价填写 0，并在 source 标注‘需人工核对’；缺失的其他文字字段留空。\n"
+        f"从已勾选的产品资料和用户与助手对话整理一份{doc_type}草稿。产品名称、描述、型号、颜色尺码可从已勾选资料提取；价格、数量、客户地址、付款/运费或交易条款只有在资料或对话明确给出时才提取，不得推断。"
+        "缺失的单价填写 0，并在 source 标注‘需人工核对’；缺失的数量默认 1 但需用户核对；缺失的其他文字字段留空。"
+        "颜色、尺码、配比等变体信息写入 configuration 字段，不能丢弃。\n"
         f"只返回一个符合 JSON 语法的对象，不要 Markdown。字段结构：{json.dumps(schema, ensure_ascii=False)}\n\n对话：\n{conversation}"
+        + ("\n\n用户勾选的资料摘录：\n" + "\n\n".join(selected_context[:20])[:18000] if selected_context else "")
     )
     headers = {"Authorization": f"Bearer {cfg['api_key']}"} if cfg["api_key"] else {}
     try:

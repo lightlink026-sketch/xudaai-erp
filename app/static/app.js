@@ -2,6 +2,8 @@ const $ = (selector) => document.querySelector(selector);
 let chatHistory = [];
 let selectedChatImage = null;
 let modelHasSavedKey = false;
+const quoteCandidates = new Map();
+const selectedQuoteProducts = new Map();
 
 function toast(message) {
   const el = document.createElement('div');
@@ -89,18 +91,48 @@ function renderReferences(bubble, data) {
     const section = document.createElement('div');
     section.className = 'reference-list';
     section.innerHTML = `<b>参考资料 (${sources.length})</b>` + sources.map((item) => {
+      quoteCandidates.set(String(item.file_id), item);
       const page = item.page == null ? '' : ` · 第 ${item.page} 页`;
-      return `<a class="reference-item" href="/api/files/${item.file_id}/open" target="_blank"><span>▤</span><span><b>${esc(item.name)}</b><small>${esc(item.path)}${page}</small>${item.snippet ? `<em>${esc(item.snippet.slice(0, 180))}</em>` : ''}</span><i>↗</i></a>`;
+      return `<div class="reference-select-row"><label><input type="checkbox" data-select-quote="${item.file_id}" ${selectedQuoteProducts.has(String(item.file_id)) ? 'checked' : ''}><span>加入单据</span></label><a class="reference-item" href="/api/files/${item.file_id}/open" target="_blank"><span>▤</span><span><b>${esc(item.name)}</b><small>${esc(item.path)}${page}</small>${item.snippet ? `<em>${esc(item.snippet.slice(0, 180))}</em>` : ''}</span><i>↗</i></a></div>`;
     }).join('');
     body.append(section);
   }
   if (images.length) {
     const section = document.createElement('div');
     section.className = 'chat-image-matches';
-    section.innerHTML = `<b>相似产品图片 (${images.length})</b><div class="chat-match-grid">${images.map((item) => `<a href="/api/files/${item.file_id}/open" target="_blank"><img src="${item.preview_url}" loading="lazy" alt="${esc(item.name)}"><span>${esc(item.name)}</span><small>相似度 ${Number(item.similarity).toFixed(3)}</small></a>`).join('')}</div>`;
+    section.innerHTML = `<b>相似产品图片 (${images.length})</b><div class="chat-match-grid">${images.map((item) => { quoteCandidates.set(String(item.file_id), item); return `<div class="chat-match-card"><a href="/api/files/${item.file_id}/open" target="_blank"><img src="${item.preview_url}" loading="lazy" alt="${esc(item.name)}"><span>${esc(item.name)}</span><small>相似度 ${Number(item.similarity).toFixed(3)}</small></a><label><input type="checkbox" data-select-quote="${item.file_id}" ${selectedQuoteProducts.has(String(item.file_id)) ? 'checked' : ''}>加入报价</label></div>`; }).join('')}</div>`;
     body.append(section);
   }
 }
+
+$('#chat-thread').addEventListener('change', (event) => {
+  const checkbox = event.target.closest('[data-select-quote]');
+  if (!checkbox) return;
+  const id = String(checkbox.dataset.selectQuote);
+  if (checkbox.checked) selectedQuoteProducts.set(id, quoteCandidates.get(id));
+  else selectedQuoteProducts.delete(id);
+  document.querySelectorAll(`[data-select-quote="${CSS.escape(id)}"]`).forEach((other) => { other.checked = checkbox.checked; });
+  $('#open-quote-dialog').textContent = selectedQuoteProducts.size ? `报价 / PI (${selectedQuoteProducts.size})` : '报价 / PI';
+  const holder = $('#quote-selected-products');
+  if (holder) renderSelectedQuoteProducts();
+});
+
+function renderSelectedQuoteProducts() {
+  const holder = $('#quote-selected-products');
+  if (!holder) return;
+  const selected = [...selectedQuoteProducts.values()];
+  holder.innerHTML = selected.length ? `<b>已勾选 ${selected.length} 项检索结果</b>${selected.map((item) => `<span>${esc(item.name)}<small>${esc(item.path || '')}</small><button type="button" data-remove-selected="${item.file_id}" aria-label="移除">移除</button></span>`).join('')}` : '<span>还没有勾选产品。请先在对话结果中勾选产品图片或资料。</span>';
+}
+
+$('#quote-selected-products').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-remove-selected]');
+  if (!button) return;
+  const id = String(button.dataset.removeSelected);
+  selectedQuoteProducts.delete(id);
+  document.querySelectorAll(`[data-select-quote="${CSS.escape(id)}"]`).forEach((checkbox) => { checkbox.checked = false; });
+  $('#open-quote-dialog').textContent = selectedQuoteProducts.size ? `报价 / PI (${selectedQuoteProducts.size})` : '报价 / PI';
+  renderSelectedQuoteProducts();
+});
 
 $('#chat-form').onsubmit = async (event) => {
   event.preventDefault();
@@ -353,19 +385,29 @@ let quoteDefaults = {};
 
 async function loadQuoteTemplates() {
   const select = $('#quote-template');
-  const selected = select.value || quoteDefaults.template_name || '';
+  const current = select.value || '';
   try {
     const [templateResponse, defaultsResponse] = await Promise.all([fetch('/api/quotes/templates'), fetch('/api/quotes/defaults')]);
     const data = await templateResponse.json();
     quoteDefaults = (await defaultsResponse.json()).defaults || {};
     select.innerHTML = '<option value="">系统默认模板</option>' + (data.templates || []).map((item) => `<option value="${esc(item.name)}">${esc(item.name)}</option>`).join('');
-    select.value = selected;
+    select.value = current || quoteDefaults.template_name || '';
   } catch (_) { select.innerHTML = '<option value="">系统默认模板</option>'; select.value = ''; }
 }
 
+async function loadQuoteCustomers() {
+  const select = $('#quote-customer-select');
+  try {
+    const response = await fetch('/api/quotes/customers'); const data = await response.json();
+    select.innerHTML = '<option value="">新客户 / 手动填写</option>' + (data.customers || []).map((item) => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join('');
+    select._customers = data.customers || [];
+  } catch (_) { select.innerHTML = '<option value="">新客户 / 手动填写</option>'; select._customers = []; }
+}
+
 $('#open-quote-dialog').onclick = async () => {
-  await loadQuoteTemplates(); await loadQuotes();
+  await Promise.all([loadQuoteTemplates(), loadQuoteCustomers(), loadQuotes()]);
   if (!activeQuoteId) $('#quote-form').elements.namedItem('document_type').value = pendingDocumentType;
+  renderSelectedQuoteProducts();
   $('#quote-dialog').showModal();
 };
 $('#close-quote-dialog').onclick = () => $('#quote-dialog').close();
@@ -398,7 +440,7 @@ $('#quote-template-upload').onchange = async (event) => {
 function addQuoteItem(item = {}) {
   const row = document.createElement('div');
   row.className = 'quote-item-row';
-  row.innerHTML = `<div class="quote-item-fields"><label>产品名称/型号<input data-field="name" required value="${esc(item.name || '')}" placeholder="产品型号"></label><label>描述<input data-field="description" value="${esc(item.description || '')}" placeholder="产品描述"></label><label>数量<input data-field="quantity" type="number" min="0.001" step="0.001" value="${esc(item.quantity || '1')}"></label><label>单位<input data-field="unit" value="${esc(item.unit || 'pcs')}"></label><label>单价<input data-field="unit_price" type="number" min="0" step="0.01" value="${esc(item.unit_price || '0')}"></label><label>折扣 %<input data-field="discount_percent" type="number" min="0" max="100" step="0.01" value="${esc(item.discount_percent || '0')}"></label><label>价格/资料来源<input data-field="source" value="${esc(item.source || '人工确认')}" placeholder="文件名、工作表或人工确认"></label></div><button type="button" class="quote-remove" aria-label="删除产品行">删除</button>`;
+  row.innerHTML = `<div class="quote-item-fields"><label>产品名称/型号<input data-field="name" required value="${esc(item.name || '')}" placeholder="产品型号"></label><label>描述<input data-field="description" value="${esc(item.description || '')}" placeholder="产品描述"></label><label>颜色/尺码/配比<input data-field="configuration" value="${esc(item.configuration || '')}" placeholder="如黑/白各10双，36-44尺码配比"></label><label>数量<input data-field="quantity" type="number" min="0.001" step="0.001" value="${esc(item.quantity || '1')}"></label><label>单位<input data-field="unit" value="${esc(item.unit || 'pcs')}"></label><label>单价<input data-field="unit_price" type="number" min="0" step="0.01" value="${esc(item.unit_price || '0')}"></label><label>折扣 %<input data-field="discount_percent" type="number" min="0" max="100" step="0.01" value="${esc(item.discount_percent || '0')}"></label><label>价格/资料来源<input data-field="source" value="${esc(item.source || '人工确认')}" placeholder="文件名、工作表或人工确认"></label></div><button type="button" class="quote-remove" aria-label="删除产品行">删除</button>`;
   row.querySelectorAll('input').forEach((input) => input.addEventListener('input', updateQuoteTotal));
   row.querySelector('.quote-remove').onclick = () => { row.remove(); updateQuoteTotal(); };
   $('#quote-items').append(row);
@@ -408,12 +450,17 @@ function addQuoteItem(item = {}) {
 function quotePayload() {
   const form = $('#quote-form');
   const value = (name) => form.elements.namedItem(name).value.trim();
+  const selectValue = (name, customName) => value(name) === 'custom' ? value(customName) : value(name);
+  const quoteDate = value('quote_date');
+  const expiry = new Date(`${quoteDate}T12:00:00`);
+  const daysRaw = value('valid_days') === 'custom' ? value('valid_days_custom') : value('valid_days');
+  expiry.setDate(expiry.getDate() + Math.min(365, Math.max(1, Number(daysRaw) || 30)));
   return {
     document_type: value('document_type'), template_name: value('template_name'),
     company_name: value('company_name'), company_contact: value('company_contact'),
     customer: value('customer'), customer_address: value('customer_address'),
-    quote_date: value('quote_date'), valid_until: value('valid_until'), currency: value('currency'),
-    incoterm: value('incoterm'), payment_terms: value('payment_terms'), delivery_time: value('delivery_time'), bank_details: value('bank_details'), notes: value('notes'),
+    quote_date: quoteDate, valid_until: Number.isNaN(expiry.getTime()) ? '' : expiry.toISOString().slice(0,10), currency: value('currency'),
+    incoterm: selectValue('incoterm','incoterm_custom'), payment_terms: selectValue('payment_terms','payment_terms_custom'), payment_note: value('payment_note'), shipping_term: selectValue('shipping_term','shipping_term_custom'), tax_term: selectValue('tax_term','tax_term_custom'), tax_amount: value('tax_amount') || '0', tax_note: value('tax_note'), delivery_time: value('delivery_time'), bank_details: value('bank_details'), notes: value('notes'),
     shipping: value('shipping') || '0', other_fees: value('other_fees') || '0',
     items: [...document.querySelectorAll('.quote-item-row')].map((row) => {
       const item = {};
@@ -432,16 +479,30 @@ function updateQuoteTotal() {
     const discount = Math.min(100, Math.max(0, Number(item.discount_percent) || 0));
     return sum + qty * price * (1 - discount / 100);
   }, 0);
-  const total = subtotal + (Number(payload.shipping) || 0) + (Number(payload.other_fees) || 0);
+  const total = subtotal + (Number(payload.shipping) || 0) + (Number(payload.other_fees) || 0) + (Number(payload.tax_amount) || 0);
   $('#quote-total').textContent = `总计：${payload.currency} ${total.toFixed(places)}`;
 }
 
 function fillQuoteForm(data, id = null, quoteNo = '') {
   const form = $('#quote-form');
   data = { ...quoteDefaults, ...data };
-  for (const name of ['document_type','template_name','company_name','company_contact','customer','customer_address','quote_date','valid_until','currency','incoterm','payment_terms','delivery_time','bank_details','notes','shipping','other_fees']) {
+  if (data.document_type === 'PI') data.document_type = 'pi';
+  if (data.document_type === 'Q') data.document_type = 'quote';
+  data.document_type ||= 'quote'; data.incoterm ||= 'EXW'; data.payment_terms ||= 'T/T 30% deposit, 70% before shipment';
+  data.shipping_term ||= 'Excluded'; data.tax_term ||= 'Excluded';
+  for (const name of ['document_type','template_name','company_name','company_contact','customer','customer_address','quote_date','currency','delivery_time','bank_details','notes','shipping','other_fees','shipping_term','tax_term','tax_amount','tax_note','payment_note']) {
     form.elements.namedItem(name).value = data[name] ?? (name === 'quote_date' ? new Date().toISOString().slice(0,10) : ['shipping','other_fees'].includes(name) ? '0' : name === 'currency' ? 'USD' : '');
   }
+  for (const [selectName, customName] of [['incoterm','incoterm_custom'],['payment_terms','payment_terms_custom'],['shipping_term','shipping_term_custom'],['tax_term','tax_term_custom']]) {
+    const select = form.elements.namedItem(selectName); const raw = data[selectName] || '';
+    if ([...select.options].some((option) => option.value === raw)) { select.value = raw; form.elements.namedItem(customName).value = ''; form.elements.namedItem(customName).hidden = true; }
+    else { select.value = 'custom'; form.elements.namedItem(customName).value = raw; form.elements.namedItem(customName).hidden = false; }
+  }
+  const expiryDays = data.valid_until && data.quote_date ? Math.round((new Date(`${data.valid_until}T12:00:00`) - new Date(`${data.quote_date}T12:00:00`)) / 86400000) : 30;
+  const validSelect = $('#quote-valid-days');
+  const allowedDays = ['7','15','30','60','90'];
+  if (allowedDays.includes(String(expiryDays))) { validSelect.value = String(expiryDays); $('#quote-form').elements.namedItem('valid_days_custom').hidden = true; }
+  else { validSelect.value = 'custom'; $('#quote-form').elements.namedItem('valid_days_custom').value = Math.min(365, Math.max(1, expiryDays || 30)); $('#quote-form').elements.namedItem('valid_days_custom').hidden = false; }
   $('#quote-items').innerHTML = '';
   (data.items?.length ? data.items : [{}]).forEach(addQuoteItem);
   activeQuoteId = id;
@@ -453,6 +514,21 @@ function fillQuoteForm(data, id = null, quoteNo = '') {
   $('#quote-pdf').disabled = false;
   updateQuoteTotal();
 }
+
+$('#quote-customer-select').onchange = (event) => {
+  const customer = event.target._customers?.find((item) => item.id === event.target.value);
+  if (customer) { $('#quote-form').elements.namedItem('customer').value = customer.name; $('#quote-form').elements.namedItem('customer_address').value = customer.address || ''; }
+};
+
+$('#quote-form').addEventListener('change', (event) => {
+  const name = event.target.name;
+  if (name === 'valid_days') $('#quote-form').elements.namedItem('valid_days_custom').hidden = event.target.value !== 'custom';
+  if (['incoterm','payment_terms','shipping_term','tax_term'].includes(name)) {
+    const custom = $('#quote-form').elements.namedItem(`${name}_custom`);
+    custom.hidden = event.target.value !== 'custom';
+    if (!custom.hidden) custom.focus();
+  }
+});
 
 async function saveQuote() {
   const payload = quotePayload();
@@ -489,15 +565,26 @@ $('#quote-save-defaults').onclick = async () => {
     quoteDefaults = data.defaults; $('#quote-state').textContent = '公司抬头、常用条款和模板已保存为默认配置。';
   } catch (error) { $('#quote-state').textContent = error.message; }
 };
+$('#quote-save-customer').onclick = async () => {
+  const form = $('#quote-form');
+  try {
+    const response = await fetch('/api/quotes/customers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: form.elements.namedItem('customer').value, address: form.elements.namedItem('customer_address').value }) });
+    const data = await response.json(); if (!response.ok) throw new Error(data.detail || '保存客户失败');
+    await loadQuoteCustomers(); $('#quote-customer-select').value = data.customer.id;
+    $('#quote-state').textContent = `客户“${data.customer.name}”已保存，可下次直接选择。`;
+  } catch (error) { $('#quote-state').textContent = error.message; }
+};
 $('#quote-import-chat').onclick = async () => {
-  if (!chatHistory.length) { $('#quote-state').textContent = '请先在 AI 对话中说明产品和客户信息，再进行整理。'; return; }
+  if (!chatHistory.length && !selectedQuoteProducts.size) { $('#quote-state').textContent = '请先在 AI 对话中检索并勾选产品，或说明客户和产品信息。'; return; }
   const button = $('#quote-import-chat'); button.disabled = true; $('#quote-state').textContent = '正在从当前对话整理单据草稿…';
   try {
-    const response = await fetch('/api/quotes/from-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document_type: $('#quote-form').elements.namedItem('document_type').value, model_id: $('#chat-model-select').value || 'local', history: chatHistory }) });
+    const response = await fetch('/api/quotes/from-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document_type: $('#quote-form').elements.namedItem('document_type').value, model_id: $('#chat-model-select').value || 'local', history: chatHistory, selected_products: [...selectedQuoteProducts.keys()] }) });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || '无法整理对话内容');
     const draft = data.draft;
-    fillQuoteForm({ ...draft, document_type: $('#quote-form').elements.namedItem('document_type').value, company_name: $('#quote-form').elements.namedItem('company_name').value, company_contact: $('#quote-form').elements.namedItem('company_contact').value, template_name: $('#quote-template').value, other_fees: '0' });
+    const current = quotePayload();
+    const merged = { ...draft, document_type: current.document_type, template_name: current.template_name, company_name: current.company_name, company_contact: current.company_contact, currency: current.currency, quote_date: current.quote_date, incoterm: current.incoterm, payment_terms: current.payment_terms, payment_note: current.payment_note, shipping_term: current.shipping_term, tax_term: current.tax_term, tax_amount: current.tax_amount, tax_note: current.tax_note, shipping: current.shipping, other_fees: current.other_fees, delivery_time: draft.delivery_time || current.delivery_time, bank_details: draft.bank_details || current.bank_details, customer: draft.customer || current.customer, customer_address: draft.customer_address || current.customer_address, valid_until: draft.valid_until || current.valid_until, items: draft.items?.length ? draft.items : current.items };
+    fillQuoteForm(merged);
     $('#quote-state').textContent = '已从对话提取草稿。请逐项核对，尤其是标记需核对的价格，再保存或生成。';
   } catch (error) { $('#quote-state').textContent = error.message || '整理失败'; }
   finally { button.disabled = false; }
