@@ -405,9 +405,60 @@ def quote_defaults_get() -> dict[str, Any]:
         return {"defaults": {}}
 
 
+def discover_company_profiles() -> list[dict[str, str]]:
+    """Read company contact profiles from LIBRARY_DIR/公司资料/<company folder>."""
+    root = LIBRARY_DIR / "公司资料"
+    if not root.is_dir():
+        return []
+    company_dirs = sorted((item for item in root.iterdir() if item.is_dir()), key=lambda item: item.name.casefold())
+    if any(item.is_file() and item.suffix.lower() in {".docx", ".pdf", ".txt", ".md", ".csv"} for item in root.iterdir()):
+        company_dirs.append(root)
+    profiles: list[dict[str, str]] = []
+    for folder in company_dirs:
+        text_parts: list[str] = []
+        sources: list[str] = []
+        candidates = [path for path in folder.rglob("*") if path.is_file() and path.suffix.lower() in {".docx", ".pdf", ".txt", ".md", ".csv"}]
+        candidates.sort(key=lambda path: (0 if path.suffix.lower() in {".docx", ".pdf"} else 1, path.name.casefold()))
+        for path in candidates[:12]:
+            try:
+                text_parts.extend(text[:12000] for _, text in extract(path) if text.strip())
+                sources.append(path.relative_to(LIBRARY_DIR).as_posix())
+            except Exception:
+                continue
+        content = "\n".join(text_parts)[:60000]
+        name = folder.name if folder != root else "公司资料"
+        name_match = re.search(r"(?:公司名称|企业名称|公司抬头|Company\s+Name|Legal\s+Name)\s*[:：|]?\s*([^\n|]{2,100})", content, re.I)
+        if name_match:
+            candidate_name = name_match.group(1).strip(" ：:|")
+            if candidate_name and len(candidate_name) < 100:
+                name = candidate_name
+        phone_match = re.search(r"(?:电话|联系电话|手机|Tel(?:ephone)?|Phone|Mobile|WhatsApp)\s*[:：]?\s*(\+?\d[\d\s().-]{7,}\d)", content, re.I)
+        email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", content, re.I)
+        address_match = re.search(r"(?:公司地址|地址|住所|Registered\s+Address|Address)\s*[:：]?\s*([^\n]{5,250})", content, re.I)
+        address = address_match.group(1).strip(" ：:") if address_match else ""
+        if not address:
+            address_match = re.search(r"(?:[\u4e00-\u9fff]{2,}(?:省|自治区)[^\n]{4,160}|(?:Room|Suite|Unit)\s+[^\n]{10,220})", content, re.I)
+            address = address_match.group(0).strip() if address_match else ""
+        profiles.append({
+            "id": (folder.relative_to(LIBRARY_DIR).as_posix() if folder != root else "公司资料"),
+            "name": name,
+            "address": address[:500],
+            "phone": phone_match.group(1).strip() if phone_match else "",
+            "email": email_match.group(0) if email_match else "",
+            "sources": "、".join(sources[:5]),
+        })
+    return profiles
+
+
+@app.get("/api/quotes/companies")
+def quote_companies() -> dict[str, Any]:
+    defaults = quote_defaults_get().get("defaults", {})
+    return {"companies": discover_company_profiles(), "selected_profile_id": defaults.get("company_profile_id", "")}
+
+
 @app.put("/api/quotes/defaults")
 async def quote_defaults_put(payload: dict[str, Any]) -> dict[str, Any]:
-    keys = {"company_name", "company_contact", "company_address", "company_phone", "company_email", "currency", "incoterm", "payment_terms", "payment_note", "shipping_term", "tax_term", "tax_note", "delivery_time", "bank_details", "template_name"}
+    keys = {"company_name", "company_contact", "company_address", "company_phone", "company_email", "company_profile_id", "currency", "incoterm", "payment_terms", "payment_note", "shipping_term", "tax_term", "tax_note", "delivery_time", "bank_details", "template_name"}
     values = {key: str(payload.get(key, "")).strip()[:1000] for key in keys}
     if values.get("currency") and not re.fullmatch(r"[A-Za-z]{3}", values["currency"]):
         raise HTTPException(422, "默认币种请使用三位代码，例如 USD")

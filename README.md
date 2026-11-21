@@ -65,6 +65,8 @@ AI 对话页提供“生成产品报价”和“生成 PI 形式发票”快捷�
 
 DOCX 模板可放在 `data/templates/`，也可从 AI 对话中的报价/PI 单据窗口上传；可在 `data/templates/quote_defaults.json` 配置公司抬头、联系信息、常用条款、默认币种和模板，或在页面点“保存默认配置”。常用客户保存在 `data/templates/customers.json`。模板占位符示例：`{{quote_no}}`、`{{customer}}`、`{{company_name}}`、`{{company_address}}`、`{{company_phone}}`、`{{items}}`、`{{total}}`、`{{payment_terms}}`、`{{bank_details}}`。DOCX 的段落和表格文字会用于 PDF 内容；当前转换器会用应用的标准 PDF 样式重排，复杂 Word 样式、页眉页脚和内嵌图片不保证原样保留。
 
+公司资料可按 `LIBRARY_DIR/公司资料/<公司名称>/` 放置 DOCX、PDF、TXT 或 CSV 文件。报价窗口会自动扫描并识别公司名称、地址、电话和邮箱；多家公司会出现在“选择公司资料”下拉框中，单家公司会自动载入。
+
 Windows 本机 PDF 使用微软雅黑；Docker 镜像安装 Noto CJK 字体。若需要自定义字体，可设置 `QUOTE_FONT_PATH` 指向可用的中文 TrueType Collection 字体。产品价格从已索引的关联报价资料中自动匹配，无法确认的价格会标记核对；运费仍由用户填写。公司抬头和联系信息可填写并保存为默认值。
 
 ## API 示例

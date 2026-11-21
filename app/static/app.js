@@ -383,6 +383,7 @@ let activeQuoteStatus = 'draft';
 let pendingDocumentType = 'quote';
 let quoteDefaults = {};
 let autoImportedSelection = '';
+let availableCompanyProfiles = [];
 
 async function loadQuoteTemplates() {
   const select = $('#quote-template');
@@ -405,8 +406,40 @@ async function loadQuoteCustomers() {
   } catch (_) { select.innerHTML = '<option value="">新客户 / 手动填写</option>'; select._customers = []; }
 }
 
+function applyCompanyProfile(profile, preferDefaults = false) {
+  if (!profile) return;
+  const value = (key) => preferDefaults && quoteDefaults[key] ? quoteDefaults[key] : profile[key] || '';
+  const form = $('#quote-form');
+  form.elements.namedItem('company_name').value = value('company_name') || profile.name || '';
+  form.elements.namedItem('company_address').value = value('company_address');
+  form.elements.namedItem('company_phone').value = value('company_phone');
+  form.elements.namedItem('company_email').value = value('company_email');
+  const source = profile.sources ? `已载入公司资料：${profile.sources}` : `已载入公司资料：${profile.name}`;
+  $('#quote-state').textContent = source;
+}
+
+async function loadCompanyProfiles() {
+  const select = $('#quote-company-profile');
+  try {
+    const response = await fetch('/api/quotes/companies');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '公司资料读取失败');
+    availableCompanyProfiles = data.companies || [];
+    select.innerHTML = '<option value="">手动填写</option>' + availableCompanyProfiles.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}${item.phone ? ` · ${esc(item.phone)}` : ''}</option>`).join('');
+    const remembered = quoteDefaults.company_profile_id || data.selected_profile_id || '';
+    const profileId = availableCompanyProfiles.some((item) => item.id === remembered) ? remembered : (availableCompanyProfiles.length === 1 ? availableCompanyProfiles[0].id : '');
+    select.value = profileId;
+    if (!activeQuoteId && profileId) applyCompanyProfile(availableCompanyProfiles.find((item) => item.id === profileId), Boolean(remembered));
+  } catch (error) {
+    availableCompanyProfiles = [];
+    select.innerHTML = '<option value="">手动填写</option>';
+    if (error) console.warn(error);
+  }
+}
+
 $('#open-quote-dialog').onclick = async () => {
-  await Promise.all([loadQuoteTemplates(), loadQuoteCustomers(), loadQuotes()]);
+  await loadQuoteTemplates();
+  await Promise.all([loadQuoteCustomers(), loadQuotes(), loadCompanyProfiles()]);
   if (!activeQuoteId) $('#quote-form').elements.namedItem('document_type').value = pendingDocumentType;
   renderSelectedQuoteProducts();
   $('#quote-dialog').showModal();
@@ -458,7 +491,7 @@ function quotePayload() {
   expiry.setDate(expiry.getDate() + Math.min(365, Math.max(1, Number(daysRaw) || 30)));
   return {
     document_type: value('document_type'), template_name: value('template_name'),
-    company_name: value('company_name'), company_address: value('company_address'), company_phone: value('company_phone'), company_email: value('company_email'),
+    company_profile_id: $('#quote-company-profile').value, company_name: value('company_name'), company_address: value('company_address'), company_phone: value('company_phone'), company_email: value('company_email'),
     company_contact: [value('company_address'), value('company_phone'), value('company_email')].filter(Boolean).join('\n'),
     customer: value('customer'), customer_address: value('customer_address'),
     quote_date: quoteDate, valid_until: Number.isNaN(expiry.getTime()) ? '' : expiry.toISOString().slice(0,10), currency: value('currency'),
@@ -563,6 +596,11 @@ $('#quote-next').onclick = () => {
 $('#quote-customer-select').onchange = (event) => {
   const customer = event.target._customers?.find((item) => item.id === event.target.value);
   if (customer) { $('#quote-form').elements.namedItem('customer').value = customer.name; $('#quote-form').elements.namedItem('customer_address').value = customer.address || ''; }
+};
+
+$('#quote-company-profile').onchange = (event) => {
+  const profile = availableCompanyProfiles.find((item) => item.id === event.target.value);
+  if (profile) applyCompanyProfile(profile);
 };
 
 $('#quote-form').addEventListener('change', (event) => {
