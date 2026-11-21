@@ -185,14 +185,33 @@ $('#workspace-upload').onchange = async (event) => {
   const uploadWorkspace = currentWorkspace;
   const reply = addMessage('assistant', `正在把 ${files.length} 个文件加入${workspaceInfo[currentWorkspace][0]}资料库…`);
   try {
-    const form = new FormData(); files.forEach((file) => form.append('files', file));
-    const spreadsheet = files.length === 1 && /\.(csv|xlsx|xlsm)$/i.test(files[0].name);
-    const endpoint = currentWorkspace === 'freight' && spreadsheet ? '/api/business/freight/import' : currentWorkspace === 'customer' && spreadsheet ? '/api/business/customers/import' : '/api/files/upload';
-    if (endpoint.endsWith('/import')) form.set('file', files[0]);
-    else form.append('folder', ({ product: '产品资料', customer: '客户资料', sales: '销售资料', payroll: '薪酬资料', rules: '团队规则资料', quote: '报价资料', pi: 'PI资料' })[currentWorkspace] || '共享资料');
-    const response = await fetch(endpoint, { method: 'POST', body: form });
-    const data = await response.json(); if (!response.ok) throw new Error(data.detail || '上传失败');
-    const summary = endpoint.endsWith('/import') ? `已从 ${data.source_file} 导入 ${data.imported} 条运费规则；货代分类：${(data.carriers || []).join('、') || '按文件名归类'}；工作表：${(data.sheets || []).join('、') || '默认表'}。${data.needs_review ? `${data.needs_review} 条计价方式需要人工确认。` : '识别到的计价规则已分类，可在对话中按货代分别计算或对比。'}` : `已上传并索引 ${data.uploaded || 0} 个文件。${data.files?.filter((f) => f.status === 'error').length ? '部分文件解析失败，请查看同步记录。' : ''}`;
+    const summaries = [];
+    if (currentWorkspace === 'freight') {
+      const sheets = files.filter((file) => /\.(csv|xlsx|xlsm)$/i.test(file.name));
+      const otherFiles = files.filter((file) => !sheets.includes(file));
+      for (const file of sheets) {
+        const form = new FormData(); form.set('file', file);
+        const response = await fetch('/api/business/freight/import', { method: 'POST', body: form });
+        const data = await response.json(); if (!response.ok) throw new Error(`${file.name}：${data.detail || '导入失败'}`);
+        summaries.push(`已从 ${data.source_file} 导入 ${data.imported} 条规则；货代：${(data.carriers || []).join('、') || '按文件名归类'}；工作表：${(data.sheets || []).join('、') || '默认表'}。${data.needs_review ? `${data.needs_review} 条计价方式需人工确认。` : '计价规则已分类，可分别计算或对比。'}`);
+      }
+      if (otherFiles.length) {
+        const form = new FormData(); otherFiles.forEach((file) => form.append('files', file)); form.append('folder', '运费资料');
+        const response = await fetch('/api/files/upload', { method: 'POST', body: form });
+        const data = await response.json(); if (!response.ok) throw new Error(data.detail || '文件上传失败');
+        summaries.push(`另有 ${data.uploaded || 0} 个非表格文件已索引，AI 可用于查阅。`);
+      }
+    } else {
+      const form = new FormData(); files.forEach((file) => form.append('files', file));
+      const spreadsheet = files.length === 1 && /\.(csv|xlsx|xlsm)$/i.test(files[0].name);
+      const endpoint = currentWorkspace === 'customer' && spreadsheet ? '/api/business/customers/import' : '/api/files/upload';
+      if (endpoint.endsWith('/import')) form.set('file', files[0]);
+      else form.append('folder', ({ product: '产品资料', customer: '客户资料', sales: '销售资料', payroll: '薪酬资料', rules: '团队规则资料', quote: '报价资料', pi: 'PI资料' })[currentWorkspace] || '共享资料');
+      const response = await fetch(endpoint, { method: 'POST', body: form });
+      const data = await response.json(); if (!response.ok) throw new Error(data.detail || '上传失败');
+      summaries.push(`已上传并索引 ${data.uploaded || data.imported || 0} 个文件。${data.files?.filter((f) => f.status === 'error').length ? '部分文件解析失败，请查看同步记录。' : ''}`);
+    }
+    const summary = summaries.join('\n');
     reply.querySelector('.message-text').textContent = summary;
     if (uploadWorkspace === currentWorkspace) await loadStatus();
     await appendWorkspaceMessage(uploadWorkspace, summary);
