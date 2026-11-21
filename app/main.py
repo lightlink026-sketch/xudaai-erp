@@ -34,6 +34,7 @@ from .quotes import list_quotes, normalize_quote, pdf_response
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
 LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", "./library")).resolve()
+TEMPLATES_DIR = Path(os.getenv("TEMPLATES_DIR", str(DATA_DIR / "templates"))).resolve()
 DB_PATH = DATA_DIR / "library.sqlite3"
 CONFIG_PATH = DATA_DIR / "settings.json"
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024
@@ -386,12 +387,106 @@ def quotes_list() -> dict[str, Any]:
         return {"quotes": list_quotes(c)}
 
 
+@app.get("/api/quotes/templates")
+def quote_templates() -> dict[str, Any]:
+    TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+    return {"templates": [{"name": item.name, "size": item.stat().st_size} for item in sorted(TEMPLATES_DIR.glob("*.docx")) if item.is_file()]}
+
+
+@app.get("/api/quotes/defaults")
+def quote_defaults_get() -> dict[str, Any]:
+    path = TEMPLATES_DIR / "quote_defaults.json"
+    if not path.is_file():
+        return {"defaults": {}}
+    try:
+        values = json.loads(path.read_text(encoding="utf-8"))
+        return {"defaults": values if isinstance(values, dict) else {}}
+    except (OSError, ValueError):
+        return {"defaults": {}}
+
+
+@app.put("/api/quotes/defaults")
+async def quote_defaults_put(payload: dict[str, Any]) -> dict[str, Any]:
+    keys = {"company_name", "company_contact", "currency", "incoterm", "payment_terms", "delivery_time", "bank_details", "template_name"}
+    values = {key: str(payload.get(key, "")).strip()[:1000] for key in keys}
+    if values.get("currency") and not re.fullmatch(r"[A-Za-z]{3}", values["currency"]):
+        raise HTTPException(422, "默认币种请使用三位代码，例如 USD")
+    if values.get("template_name") and Path(values["template_name"]).name != values["template_name"]:
+        raise HTTPException(422, "无效模板名称")
+    TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+    path = TEMPLATES_DIR / "quote_defaults.json"
+    temp = path.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(values, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(path)
+    return {"defaults": values}
+
+
+@app.post("/api/quotes/from-chat")
+async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
+    model_id = str(payload.get("model_id", "local"))
+    if model_id == "local":
+        raise HTTPException(400, "请在对话底部选择一个已配置模型，再从对话整理单据")
+    profiles = [item for item in read_model_store().get("profiles", []) if isinstance(item, dict)]
+    if profiles and model_id not in {str(item.get("id")) for item in profiles}:
+        raise HTTPException(404, "所选模型配置不存在")
+    cfg = model_config(model_id)
+    if not cfg["api_key"] and cfg["provider"] != "ollama":
+        raise HTTPException(400, "所选模型尚未配置 API Key")
+    history = payload.get("history", [])
+    if not isinstance(history, list):
+        raise HTTPException(422, "对话记录格式无效")
+    conversation = "\n".join(f"{str(item.get('role',''))}: {str(item.get('content',''))[:2000]}" for item in history[-16:] if isinstance(item, dict) and item.get("role") in {"user", "assistant"})[:16000]
+    if not conversation.strip():
+        raise HTTPException(400, "请先在 AI 对话中说明客户和产品，再整理报价/PI")
+    doc_type = "PI" if str(payload.get("document_type", "quote")).lower() == "pi" else "报价单"
+    schema = {"customer":"", "customer_address":"", "quote_date":"", "valid_until":"", "currency":"USD", "incoterm":"", "payment_terms":"", "delivery_time":"", "bank_details":"", "notes":"", "items":[{"name":"", "description":"", "quantity":"1", "unit":"pcs", "unit_price":"0", "discount_percent":"0", "source":"需人工核对"}]}
+    instruction = (
+        f"从下面的用户与助手对话整理一份{doc_type}草稿，只能提取明确说出的字段，不得推断客户地址、价格、数量、付款/运费或条款。"
+        "缺失的单价填写 0，并在 source 标注‘需人工核对’；缺失的其他文字字段留空。\n"
+        f"只返回一个符合 JSON 语法的对象，不要 Markdown。字段结构：{json.dumps(schema, ensure_ascii=False)}\n\n对话：\n{conversation}"
+    )
+    headers = {"Authorization": f"Bearer {cfg['api_key']}"} if cfg["api_key"] else {}
+    try:
+        async with httpx.AsyncClient(timeout=90) as client:
+            response = await client.post(f"{cfg['base_url'].rstrip('/')}/chat/completions", headers=headers, json={"model": cfg["model"], "temperature": 0, "messages":[{"role":"system","content":"你是结构化单据草稿整理器。严格遵守用户要求的 JSON 字段和不猜测原则。"},{"role":"user","content":instruction}]})
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+        if isinstance(content, list):
+            content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(content).strip(), flags=re.I)
+        draft = json.loads(cleaned)
+        if not isinstance(draft, dict) or not isinstance(draft.get("items"), list):
+            raise ValueError("missing required JSON fields")
+        return {"draft": draft}
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(502, f"模型整理单据失败，HTTP {exc.response.status_code}")
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+        raise HTTPException(502, "模型没有返回有效的单据数据，请补充信息后重试")
+
+
+@app.post("/api/quotes/templates")
+async def quote_template_upload(file: UploadFile = File(...)) -> dict[str, Any]:
+    if Path(file.filename or "").suffix.lower() != ".docx":
+        raise HTTPException(415, "报价/PI 模板请上传 DOCX 格式的 Word 文件")
+    content = await file.read(MAX_UPLOAD + 1)
+    if len(content) > MAX_UPLOAD:
+        raise HTTPException(413, f"模板文件超过 {MAX_UPLOAD // 1024 // 1024} MB")
+    if not content.startswith(b"PK"):
+        raise HTTPException(400, "文件不是有效的 DOCX 模板")
+    TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+    stem = re.sub(r"[^\w\-.\u4e00-\u9fff]+", "_", Path(file.filename or "template.docx").stem)[:80] or "template"
+    destination = TEMPLATES_DIR / f"{stem}_{uuid.uuid4().hex[:8]}.docx"
+    destination.write_bytes(content)
+    return {"name": destination.name, "size": len(content)}
+
+
 @app.post("/api/quotes")
 async def quote_create(payload: dict[str, Any]) -> dict[str, Any]:
     data = normalize_quote(payload)
     now = datetime.now(timezone.utc).isoformat()
     quote_id = str(uuid.uuid4())
-    quote_no = f"Q{date.today().strftime('%Y%m%d')}-{quote_id[:8].upper()}"
+    prefix = "PI" if data["document_type"] == "pi" else "Q"
+    quote_no = f"{prefix}{date.today().strftime('%Y%m%d')}-{quote_id[:8].upper()}"
     with db() as c:
         c.execute("INSERT INTO quotes(id,quote_no,customer,currency,status,data,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (quote_id, quote_no, data["customer"], data["currency"], "draft", json.dumps(data, ensure_ascii=False), now, now))
     return {"id": quote_id, "quote_no": quote_no, "status": "draft", "data": data}
@@ -423,7 +518,7 @@ async def quote_update(quote_id: str, payload: dict[str, Any]) -> dict[str, Any]
 
 @app.post("/api/quotes/{quote_id}/pdf")
 def quote_generate_pdf(quote_id: str):
-    response = pdf_response(DB_PATH, quote_id, DATA_DIR / "quotes")
+    response = pdf_response(DB_PATH, quote_id, DATA_DIR / "quotes", TEMPLATES_DIR)
     with db() as c:
         c.execute("UPDATE quotes SET status='issued',updated_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), quote_id))
     return response
@@ -431,7 +526,7 @@ def quote_generate_pdf(quote_id: str):
 
 @app.get("/api/quotes/{quote_id}/pdf")
 def quote_download_pdf(quote_id: str):
-    return pdf_response(DB_PATH, quote_id, DATA_DIR / "quotes")
+    return pdf_response(DB_PATH, quote_id, DATA_DIR / "quotes", TEMPLATES_DIR)
 
 
 @app.get("/api/config/models")

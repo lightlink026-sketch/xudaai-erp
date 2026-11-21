@@ -74,8 +74,12 @@ def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
         "quote_date": quote_date,
         "valid_until": str(payload.get("valid_until", "")).strip()[:30],
         "currency": currency,
+        "document_type": "pi" if str(payload.get("document_type", "quote")).lower() == "pi" else "quote",
+        "template_name": str(payload.get("template_name", "")).strip()[:150],
         "incoterm": str(payload.get("incoterm", "")).strip()[:100],
         "payment_terms": str(payload.get("payment_terms", "")).strip()[:500],
+        "delivery_time": str(payload.get("delivery_time", "")).strip()[:200],
+        "bank_details": str(payload.get("bank_details", "")).strip()[:1000],
         "notes": str(payload.get("notes", "")).strip()[:2000],
         "company_name": str(payload.get("company_name", "")).strip()[:200],
         "company_contact": str(payload.get("company_contact", "")).strip()[:500],
@@ -97,7 +101,7 @@ def list_quotes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return result
 
 
-def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path) -> None:
+def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_path: Path | None = None) -> None:
     try:
         from reportlab.lib import colors
         from reportlab.lib.enums import TA_CENTER, TA_RIGHT
@@ -134,9 +138,49 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path) -> None:
     right = ParagraphStyle("QuoteRight", parent=body, alignment=TA_RIGHT)
     story = []
     safe = lambda value: escape(str(value or "")).replace("\n", "<br/>")
+    title_text = "形式发票 / PROFORMA INVOICE" if data.get("document_type") == "pi" else "产品报价单 / QUOTATION"
+    def footer(canvas, _doc):
+        canvas.saveState()
+        canvas.setFont("QuoteCJK", 7)
+        canvas.setFillColor(colors.HexColor("#89958d"))
+        canvas.drawString(16*mm, 9*mm, quote_no)
+        canvas.drawRightString(A4[0]-16*mm, 9*mm, f"{_doc.page}")
+        canvas.restoreState()
+    if template_path and template_path.is_file():
+        from docx import Document
+        template = Document(str(template_path))
+        items_text = "\n".join(f"{i}. {item['name']} | {item.get('description') or ''} | {item['quantity']} {item['unit']} × {item['unit_price']} = {item['amount']} {data['currency']}" for i, item in enumerate(data["items"], 1))
+        values = {
+            "quote_no": quote_no, "document_no": quote_no, "customer": data.get("customer", ""),
+            "customer_address": data.get("customer_address", ""), "quote_date": data.get("quote_date", ""),
+            "valid_until": data.get("valid_until", ""), "currency": data["currency"], "incoterm": data.get("incoterm", ""),
+            "payment_terms": data.get("payment_terms", ""), "company_name": data.get("company_name", ""),
+            "delivery_time": data.get("delivery_time", ""), "bank_details": data.get("bank_details", ""),
+            "company_contact": data.get("company_contact", ""), "subtotal": data["subtotal"],
+            "shipping": data["shipping"], "other_fees": data["other_fees"], "total": data["total"],
+            "items": items_text, "notes": data.get("notes", ""), "document_title": title_text,
+        }
+        token = re.compile(r"\{\{\s*([a-z_]+)\s*\}\}")
+        def fill_template(text: str) -> str:
+            return token.sub(lambda match: str(values.get(match.group(1), "")), text)
+        if not any("{{document_title}}" in paragraph.text for paragraph in template.paragraphs):
+            story.append(Paragraph(safe(title_text), title))
+        for paragraph in template.paragraphs:
+            text = fill_template(paragraph.text).strip()
+            if text:
+                story.append(Paragraph(safe(text), body))
+        for doc_table in template.tables:
+            table_rows = []
+            for doc_row in doc_table.rows:
+                table_rows.append([Paragraph(safe(fill_template(cell.text)), small) for cell in doc_row.cells])
+            if table_rows:
+                widths = [178*mm/max(1, len(table_rows[0]))] * len(table_rows[0])
+                story.extend([Table(table_rows, colWidths=widths, repeatRows=1, style=TableStyle([("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#dce4dd")),("VALIGN",(0,0),(-1,-1),"TOP"),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#eaf1eb")),("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5)])), Spacer(1, 3*mm)])
+        doc.build(story, onFirstPage=footer, onLaterPages=footer)
+        return
+    story.append(Paragraph(safe(title_text), title))
     if data.get("company_name"):
         story.extend([Paragraph(safe(data["company_name"]), ParagraphStyle("Company", parent=body, fontSize=12, leading=16)), Paragraph(safe(data.get("company_contact", "")), small), Spacer(1, 5*mm)])
-    story.append(Paragraph("产品报价单 / QUOTATION", title))
     meta = [
         [Paragraph(f"报价单号：{safe(quote_no)}", body), Paragraph(f"日期：{safe(data['quote_date'])}", right)],
         [Paragraph(f"客户：{safe(data.get('customer') or '—')}", body), Paragraph(f"有效期至：{safe(data.get('valid_until') or '—')}", right)],
@@ -169,24 +213,16 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path) -> None:
         [Paragraph("总计", ParagraphStyle("TotalLabel", parent=body, fontSize=11)), Paragraph(f"{safe(data['currency'])} {safe(data['total'])}", ParagraphStyle("Total", parent=right, fontSize=12, textColor=colors.HexColor("#17765d")))],
     ]
     story.append(Table(summary, colWidths=[140*mm, 38*mm], hAlign="RIGHT", style=TableStyle([("ALIGN",(1,0),(1,-1),"RIGHT"),("LINEABOVE",(0,3),(-1,3),0.8,colors.HexColor("#9db7a4")),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)])))
-    terms = [("贸易条款", data.get("incoterm")), ("付款条款", data.get("payment_terms")), ("备注", data.get("notes"))]
+    terms = [("贸易条款", data.get("incoterm")), ("付款条款", data.get("payment_terms")), ("交付时间", data.get("delivery_time")), ("收款信息", data.get("bank_details")), ("备注", data.get("notes"))]
     for label, value in terms:
         if value:
             story.extend([Spacer(1, 4*mm), Paragraph(f"<b>{label}</b>：{safe(value)}", body)])
     story.extend([Spacer(1, 7*mm), Paragraph("本报价内容以双方最终确认为准。", small)])
 
-    def footer(canvas, _doc):
-        canvas.saveState()
-        canvas.setFont("QuoteCJK", 7)
-        canvas.setFillColor(colors.HexColor("#89958d"))
-        canvas.drawString(16*mm, 9*mm, quote_no)
-        canvas.drawRightString(A4[0]-16*mm, 9*mm, f"{_doc.page}")
-        canvas.restoreState()
-
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
 
 
-def pdf_response(db_path: Path, quote_id: str, quotes_dir: Path) -> FileResponse:
+def pdf_response(db_path: Path, quote_id: str, quotes_dir: Path, templates_dir: Path | None = None) -> FileResponse:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT quote_no, data FROM quotes WHERE id=?", (quote_id,)).fetchone()
@@ -200,6 +236,11 @@ def pdf_response(db_path: Path, quote_id: str, quotes_dir: Path) -> FileResponse
     if not output_path.is_relative_to(quotes_dir.resolve()):
         raise HTTPException(400, "无效的报价单编号")
     data = json.loads(row["data"])
-    render_pdf(data, row["quote_no"], output_path)
+    template_name = str(data.get("template_name", ""))
+    templates_dir = (templates_dir or quotes_dir.parent / "templates").resolve()
+    template_path = (templates_dir / template_name).resolve() if template_name else None
+    if template_path and (not template_path.is_relative_to(templates_dir) or not template_path.is_file()):
+        raise HTTPException(404, "这张单据引用的模板不存在，请重新选择模板")
+    render_pdf(data, row["quote_no"], output_path, template_path)
     filename = f"{row['quote_no']}.pdf"
     return FileResponse(output_path, media_type="application/pdf", filename=filename)

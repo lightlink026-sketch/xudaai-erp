@@ -16,9 +16,8 @@ document.querySelectorAll('.nav').forEach((button) => {
     document.querySelectorAll('.nav,.tab-panel').forEach((item) => item.classList.remove('active'));
     button.classList.add('active');
     $('#' + button.dataset.tab).classList.add('active');
-    $('#page-title').textContent = { ask: 'AI 对话', quotes: '报价 PDF', manage: '资料同步' }[button.dataset.tab];
+    $('#page-title').textContent = { ask: 'AI 对话', manage: '资料同步' }[button.dataset.tab];
     if (button.dataset.tab === 'manage') loadStatus();
-    if (button.dataset.tab === 'quotes') loadQuotes();
   };
 });
 
@@ -349,6 +348,52 @@ $('#material-upload').onchange = async (event) => {
 
 let activeQuoteId = null;
 let activeQuoteStatus = 'draft';
+let pendingDocumentType = 'quote';
+let quoteDefaults = {};
+
+async function loadQuoteTemplates() {
+  const select = $('#quote-template');
+  const selected = select.value || quoteDefaults.template_name || '';
+  try {
+    const [templateResponse, defaultsResponse] = await Promise.all([fetch('/api/quotes/templates'), fetch('/api/quotes/defaults')]);
+    const data = await templateResponse.json();
+    quoteDefaults = (await defaultsResponse.json()).defaults || {};
+    select.innerHTML = '<option value="">系统默认模板</option>' + (data.templates || []).map((item) => `<option value="${esc(item.name)}">${esc(item.name)}</option>`).join('');
+    select.value = selected;
+  } catch (_) { select.innerHTML = '<option value="">系统默认模板</option>'; select.value = ''; }
+}
+
+$('#open-quote-dialog').onclick = async () => {
+  await loadQuoteTemplates(); await loadQuotes();
+  if (!activeQuoteId) $('#quote-form').elements.namedItem('document_type').value = pendingDocumentType;
+  $('#quote-dialog').showModal();
+};
+$('#close-quote-dialog').onclick = () => $('#quote-dialog').close();
+$('#quote-dialog').onclick = (event) => { if (event.target === $('#quote-dialog')) $('#quote-dialog').close(); };
+$('#start-quote').onclick = () => {
+  pendingDocumentType = 'quote'; fillQuoteForm({ document_type: 'quote' });
+  $('#chat-message').value = '我要制作产品报价单，请先根据我提供的产品型号或图片查询资料，并逐步询问报价所需信息。价格、数量、客户信息和贸易条款未知时请向我确认，不要猜测。';
+  $('#chat-form').requestSubmit();
+};
+$('#start-pi').onclick = () => {
+  pendingDocumentType = 'pi'; fillQuoteForm({ document_type: 'pi' });
+  $('#chat-message').value = '我要制作 PI 形式发票，请先根据我提供的产品型号或图片查询资料，并逐步询问客户、产品、数量、付款、贸易条款和交付信息。单价、运费或银行信息未知时请向我确认，不要猜测。';
+  $('#chat-form').requestSubmit();
+};
+
+$('#quote-template-upload').onchange = async (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+  const form = new FormData(); form.append('file', file);
+  try {
+    const response = await fetch('/api/quotes/templates', { method: 'POST', body: form });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '模板上传失败');
+    await loadQuoteTemplates(); $('#quote-template').value = data.name;
+    $('#quote-state').textContent = `已上传并选用模板：${data.name}`;
+  } catch (error) { $('#quote-state').textContent = error.message; }
+  finally { event.target.value = ''; }
+};
 
 function addQuoteItem(item = {}) {
   const row = document.createElement('div');
@@ -364,10 +409,11 @@ function quotePayload() {
   const form = $('#quote-form');
   const value = (name) => form.elements.namedItem(name).value.trim();
   return {
+    document_type: value('document_type'), template_name: value('template_name'),
     company_name: value('company_name'), company_contact: value('company_contact'),
     customer: value('customer'), customer_address: value('customer_address'),
     quote_date: value('quote_date'), valid_until: value('valid_until'), currency: value('currency'),
-    incoterm: value('incoterm'), payment_terms: value('payment_terms'), notes: value('notes'),
+    incoterm: value('incoterm'), payment_terms: value('payment_terms'), delivery_time: value('delivery_time'), bank_details: value('bank_details'), notes: value('notes'),
     shipping: value('shipping') || '0', other_fees: value('other_fees') || '0',
     items: [...document.querySelectorAll('.quote-item-row')].map((row) => {
       const item = {};
@@ -392,7 +438,8 @@ function updateQuoteTotal() {
 
 function fillQuoteForm(data, id = null, quoteNo = '') {
   const form = $('#quote-form');
-  for (const name of ['company_name','company_contact','customer','customer_address','quote_date','valid_until','currency','incoterm','payment_terms','notes','shipping','other_fees']) {
+  data = { ...quoteDefaults, ...data };
+  for (const name of ['document_type','template_name','company_name','company_contact','customer','customer_address','quote_date','valid_until','currency','incoterm','payment_terms','delivery_time','bank_details','notes','shipping','other_fees']) {
     form.elements.namedItem(name).value = data[name] ?? (name === 'quote_date' ? new Date().toISOString().slice(0,10) : ['shipping','other_fees'].includes(name) ? '0' : name === 'currency' ? 'USD' : '');
   }
   $('#quote-items').innerHTML = '';
@@ -434,6 +481,27 @@ async function loadQuotes() {
 
 $('#quote-add-item').onclick = () => addQuoteItem();
 $('#quote-form').addEventListener('input', updateQuoteTotal);
+$('#quote-save-defaults').onclick = async () => {
+  const payload = quotePayload();
+  try {
+    const response = await fetch('/api/quotes/defaults', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await response.json(); if (!response.ok) throw new Error(data.detail || '保存失败');
+    quoteDefaults = data.defaults; $('#quote-state').textContent = '公司抬头、常用条款和模板已保存为默认配置。';
+  } catch (error) { $('#quote-state').textContent = error.message; }
+};
+$('#quote-import-chat').onclick = async () => {
+  if (!chatHistory.length) { $('#quote-state').textContent = '请先在 AI 对话中说明产品和客户信息，再进行整理。'; return; }
+  const button = $('#quote-import-chat'); button.disabled = true; $('#quote-state').textContent = '正在从当前对话整理单据草稿…';
+  try {
+    const response = await fetch('/api/quotes/from-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document_type: $('#quote-form').elements.namedItem('document_type').value, model_id: $('#chat-model-select').value || 'local', history: chatHistory }) });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '无法整理对话内容');
+    const draft = data.draft;
+    fillQuoteForm({ ...draft, document_type: $('#quote-form').elements.namedItem('document_type').value, company_name: $('#quote-form').elements.namedItem('company_name').value, company_contact: $('#quote-form').elements.namedItem('company_contact').value, template_name: $('#quote-template').value, other_fees: '0' });
+    $('#quote-state').textContent = '已从对话提取草稿。请逐项核对，尤其是标记需核对的价格，再保存或生成。';
+  } catch (error) { $('#quote-state').textContent = error.message || '整理失败'; }
+  finally { button.disabled = false; }
+};
 $('#quote-save').onclick = async () => {
   try { const data = await saveQuote(); $('#quote-state').textContent = `草稿已保存：${data.quote_no}`; toast('报价草稿已保存'); }
   catch (error) { $('#quote-state').textContent = error.message; }
@@ -496,4 +564,5 @@ function esc(value = '') {
 
 loadStatus();
 loadChatModels();
-fillQuoteForm({});
+loadQuoteTemplates().then(() => fillQuoteForm({}));
+loadQuotes();

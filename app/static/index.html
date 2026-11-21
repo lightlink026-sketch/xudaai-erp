@@ -7,14 +7,14 @@
 <body>
   <aside class="sidebar">
     <div class="brand"><div class="brand-mark">X</div><div><b>Xudaai</b><small>PRODUCT LIBRARY</small></div></div>
-    <nav><button class="nav active" data-tab="ask"><span>✧</span>AI 对话</button><button class="nav" data-tab="quotes"><span>＄</span>报价 PDF</button><button class="nav" data-tab="manage"><span>↻</span>资料同步</button></nav>
+    <nav><button class="nav active" data-tab="ask"><span>✧</span>AI 对话</button><button class="nav" data-tab="manage"><span>↻</span>资料同步</button></nav>
     <div class="side-foot"><i class="dot"></i><span>本机资料库</span><small id="side-count">载入中</small></div>
   </aside>
   <main>
     <header><div><span class="eyebrow">PRODUCT KNOWLEDGE</span><h1 id="page-title">AI 对话</h1></div><div class="header-right"><span class="pill"><i class="dot"></i> 本地运行</span><div class="avatar">X</div></div></header>
     <section class="tab-panel active" id="ask">
       <div class="chat-shell">
-        <div class="chat-intro"><div class="chat-intro-copy"><span class="eyebrow">PRODUCT KNOWLEDGE ASSISTANT</span><h2>产品资料 AI 助手</h2><p>直接提问，或附上一张产品图片。我会检索资料库并列出来源。</p></div><button id="open-model-settings" class="chat-settings-button" type="button"><span>⚙</span><span><b>模型设置</b><small id="chat-model-status">读取中…</small></span></button></div>
+        <div class="chat-intro"><div class="chat-intro-copy"><span class="eyebrow">PRODUCT KNOWLEDGE ASSISTANT</span><h2>产品资料 AI 助手</h2><p>直接提问，或附上一张产品图片。我会检索资料库并列出来源。</p><div class="document-actions"><button type="button" id="start-quote" class="secondary">生成产品报价</button><button type="button" id="start-pi" class="secondary">生成 PI 形式发票</button></div></div><button id="open-model-settings" class="chat-settings-button" type="button"><span>⚙</span><span><b>模型设置</b><small id="chat-model-status">读取中…</small></span></button></div>
         <div id="chat-thread" class="chat-thread" aria-live="polite">
           <div class="chat-welcome"><div class="assistant-mark">✧</div><div><b>你好，我可以帮你查产品资料</b><p>试试问“这个产品有哪些配件？”或上传图片后问“帮我找这款产品的参数”。</p></div></div>
         </div>
@@ -22,9 +22,9 @@
           <div id="chat-attachment" class="chat-attachment" hidden></div>
           <div id="chat-image-options" class="chat-image-options" hidden><label for="image-threshold">图片最低相似度 <input id="image-threshold" type="range" min="0" max="0.60" step="0.05" value="0.20"><output id="image-threshold-value">0.20</output></label><small>调低会显示更多候选；调高筛选更严格。分数不是准确率百分比。</small></div>
           <textarea id="chat-message" name="message" rows="2" placeholder="输入产品型号、问题，或说明你想从图片中查什么…"></textarea>
-          <div class="composer-actions"><label class="attach-button" title="附加产品图片">＋ 图片<input id="chat-image" type="file" accept="image/*" hidden></label><label class="chat-model-choice"><span>本轮模型</span><select id="chat-model-select" aria-label="选择本轮使用的模型"><option value="local">仅本地检索</option></select></label><span class="composer-hint">可只发图片；回答会附资料来源</span><button id="chat-send" class="primary">发送 <span>↑</span></button></div>
+          <div class="composer-actions"><label class="attach-button" title="附加产品图片">＋ 图片<input id="chat-image" type="file" accept="image/*" hidden></label><label class="chat-model-choice"><span>本轮模型</span><select id="chat-model-select" aria-label="选择本轮使用的模型"><option value="local">仅本地检索</option></select></label><span class="composer-hint">可只发图片；回答会附资料来源</span><button type="button" id="open-quote-dialog" class="secondary">报价 / PI</button><button id="chat-send" class="primary">发送 <span>↑</span></button></div>
         </form>
-        <div class="privacy-hint">本地检索在你的电脑完成。启用 AI 问答后，问题、图片和命中的资料片段会发送给你配置的模型服务商。</div>
+        <div class="privacy-hint">本地检索在你的电脑完成。使用 AI 问答或“从 AI 对话整理”时，对话、图片和相关资料会发送给本轮选择的模型服务商。</div>
       </div>
       <dialog id="model-dialog" class="model-dialog">
         <div class="model-dialog-head"><div><span class="eyebrow">AI PROVIDER</span><h2>模型设置</h2></div><button id="close-model-settings" type="button" aria-label="关闭">×</button></div>
@@ -44,35 +44,42 @@
         </form>
         <p class="model-dialog-note">模型服务商会收到你发送的问题、图片和命中的资料片段。API Key 仅保存在本机应用数据目录。</p>
       </dialog>
-    </section>
-    <section class="tab-panel" id="quotes">
-      <div class="intro"><span class="eyebrow">QUOTATION WORKSPACE</span><h2>产品报价单</h2><p>录入并核对产品价格，保存草稿或生成可下载的中文 PDF。价格由你确认，金额由系统计算。</p></div>
-      <div class="quote-card">
-        <div class="quote-form-head"><h3 id="quote-form-title">新建报价</h3><span id="quote-number"></span></div>
-        <form id="quote-form">
-          <div class="quote-fields">
-            <label>公司名称<input name="company_name" placeholder="填写公司抬头"></label>
-            <label>公司联系方式<input name="company_contact" placeholder="地址、电话、邮箱"></label>
-            <label>客户名称<input name="customer" placeholder="买方名称"></label>
-            <label>客户地址<input name="customer_address" placeholder="客户地址"></label>
-            <label>报价日期<input name="quote_date" type="date" required></label>
-            <label>有效期至<input name="valid_until" type="date"></label>
-            <label>币种<select name="currency"><option>USD</option><option>EUR</option><option>CNY</option><option>GBP</option><option>JPY</option></select></label>
-            <label>贸易条款<input name="incoterm" placeholder="例如 EXW / FOB Shenzhen"></label>
-            <label class="quote-wide">付款条款<input name="payment_terms" placeholder="例如 30% 订金，余款发货前支付"></label>
-          </div>
-          <div class="quote-items-head"><h3>产品明细</h3><button id="quote-add-item" class="secondary" type="button">＋ 添加产品</button></div>
-          <div id="quote-items"></div>
-          <div class="quote-fields quote-costs">
-            <label>运费<input name="shipping" type="number" min="0" step="0.01" value="0"></label>
-            <label>其他费用<input name="other_fees" type="number" min="0" step="0.01" value="0"></label>
-            <label class="quote-wide">备注<textarea name="notes" rows="2" placeholder="交期、包装、报价说明等"></textarea></label>
-          </div>
-          <div id="quote-total" class="quote-total">总计：USD 0.00</div>
-          <div class="quote-actions"><span id="quote-state">产品价格请在生成前核对。</span><button type="button" class="secondary" id="quote-save">保存草稿</button><button type="button" class="primary" id="quote-pdf">生成并下载 PDF</button><button type="button" class="secondary" id="quote-new">新建</button></div>
-        </form>
-      </div>
-      <div class="quote-list-card"><h3>报价记录</h3><div id="quote-list"><p>载入中…</p></div></div>
+      <dialog id="quote-dialog" class="model-dialog quote-dialog">
+        <div class="model-dialog-head"><div><span class="eyebrow">DOCUMENT BUILDER</span><h2>报价单 / PI</h2></div><button id="close-quote-dialog" type="button" aria-label="关闭">×</button></div>
+        <p class="model-dialog-intro">可先在 AI 对话中查询产品，再填写并核对单据。系统只按确认后的价格计算金额。</p>
+        <div class="quote-card">
+          <div class="quote-form-head"><h3 id="quote-form-title">新建单据</h3><span id="quote-number"></span></div>
+          <form id="quote-form">
+            <div class="quote-fields">
+              <label>单据类型<select name="document_type"><option value="quote">产品报价单</option><option value="pi">PI 形式发票</option></select></label>
+              <label>模板<select name="template_name" id="quote-template"><option value="">系统默认模板</option></select></label>
+              <label class="template-upload">上传 DOCX 模板<input id="quote-template-upload" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label>
+              <label>公司名称<input name="company_name" placeholder="填写公司抬头"></label>
+              <label>公司联系方式<input name="company_contact" placeholder="地址、电话、邮箱"></label>
+              <label>客户名称<input name="customer" placeholder="买方名称"></label>
+              <label>客户地址<input name="customer_address" placeholder="客户地址"></label>
+              <label>报价日期<input name="quote_date" type="date" required></label>
+              <label>有效期至<input name="valid_until" type="date"></label>
+              <label>币种<select name="currency"><option>USD</option><option>EUR</option><option>CNY</option><option>GBP</option><option>JPY</option></select></label>
+              <label>贸易条款<input name="incoterm" placeholder="例如 EXW / FOB Shenzhen"></label>
+              <label class="quote-wide">付款条款<input name="payment_terms" placeholder="例如 30% 订金，余款发货前支付"></label>
+              <label>交付时间<input name="delivery_time" placeholder="例如 收到订金后 15 天"></label>
+              <label class="quote-wide">收款/银行信息<input name="bank_details" placeholder="PI 可填写收款账户信息"></label>
+            </div>
+            <p class="template-hint">DOCX 模板可放在 data/templates（或 TEMPLATES_DIR）目录，也可在这里上传。占位符：{{customer}}、{{quote_no}}、{{items}}、{{subtotal}}、{{total}}、{{payment_terms}}、{{bank_details}}。当前会保留模板段落与表格文字，复杂样式和图片不保证原样。</p>
+            <div class="quote-items-head"><h3>产品明细</h3><button id="quote-add-item" class="secondary" type="button">＋ 添加产品</button></div>
+            <div id="quote-items"></div>
+            <div class="quote-fields quote-costs">
+              <label>运费<input name="shipping" type="number" min="0" step="0.01" value="0"></label>
+              <label>其他费用<input name="other_fees" type="number" min="0" step="0.01" value="0"></label>
+              <label class="quote-wide">备注<textarea name="notes" rows="2" placeholder="交期、包装、报价说明等"></textarea></label>
+            </div>
+            <div id="quote-total" class="quote-total">总计：USD 0.00</div>
+            <div class="quote-actions"><span id="quote-state">产品价格和运费请在生成前核对。</span><button type="button" class="secondary" id="quote-import-chat">从 AI 对话整理</button><button type="button" class="secondary" id="quote-save-defaults">保存默认配置</button><button type="button" class="secondary" id="quote-save">保存草稿</button><button type="button" class="primary" id="quote-pdf">生成并下载 PDF</button><button type="button" class="secondary" id="quote-new">新建</button></div>
+          </form>
+        </div>
+        <div class="quote-list-card"><h3>报价 / PI 记录</h3><div id="quote-list"><p>载入中…</p></div></div>
+      </dialog>
     </section>
     <section class="tab-panel" id="manage">
       <div class="intro"><span class="eyebrow">LIBRARY MAINTENANCE</span><h2>资料同步</h2><p>将文件放入配置的资料目录，点击同步以增量更新索引。</p></div>
