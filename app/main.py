@@ -793,10 +793,10 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
     if requested_currency not in {"USD", "EUR", "CNY", "GBP", "JPY"}:
         requested_currency = "USD"
     document_language = "en" if str(payload.get("language", "zh")).lower() == "en" else "zh"
-    schema = {"items":[{"selection_id":"", "name":"", "description":"", "colors":"", "size_breakdown":"", "configuration":"", "carton_spec":"", "carton_volume":"", "gross_weight":"", "net_weight":"", "quantity":"1", "moq":"0", "unit":"pairs", "unit_price":"0", "discount_percent":"0", "source":"需人工核对"}]}
+    schema = {"items":[{"selection_id":"", "name":"", "description":"", "colors":"", "size_breakdown":"", "configuration":"", "carton_spec":"", "units_per_carton":"", "carton_quantity":"", "carton_volume":"", "gross_weight":"", "net_weight":"", "quantity":"1", "moq":"0", "unit":"pairs", "unit_price":"0", "discount_percent":"0", "source":"需人工核对"}]}
     instruction = (
         f"根据每一个勾选项分别关联对应图片、目录里的商品详情和报价表，整理{doc_type}产品明细。必须针对每个不同的勾选项 ID 恰好输出一行；不能按目录合并，不能漏掉任何 ID。每行 selection_id 必须原样填写对应的‘勾选项 ID’。单据币种为 {requested_currency}；从明确对应的报价表/币种列提取型号、名称、描述、颜色、尺码范围、配置、MOQ、单价。禁止把相近款式的价格或尺码套用到当前产品。找不到确切匹配的单价填 0 并标需核对，不要编造。"
-        "颜色字段只写颜色名称，不要在颜色字段里重复分色数量；每行对应一款，quantity 是该款唯一总数量。尺码、配置、装箱规格（长×宽×高及原始单位）、单箱体积（m³）、毛重和净重只有资料里明确写出才填；体积只取资料明确值，不要自行推测。数量采用 MOQ（若未提供则为 1），单位优先按资料取值，否则鞋类用 pairs、其他用 pcs。客户、公司、付款和贸易条款不在这里提取。"
+        "颜色字段只写颜色名称，不要在颜色字段里重复分色数量；每行对应一款，quantity 是该款唯一总数量。尺码、配置、装箱规格（长×宽×高及原始单位）、单箱装量（双/箱或件/箱）、明确箱数、单箱体积（m³）、毛重和净重只有资料里明确写出才填；体积只取资料明确值，不要自行推测。数量采用 MOQ（若未提供则为 1），单位优先按资料取值，否则鞋类用 pairs、其他用 pcs。客户、公司、付款和贸易条款不在这里提取。"
         + ("所有产品文字字段必须输出英文；型号、SKU、数字和品牌原样保留。" if document_language == "en" else "产品文字字段按资料原文输出。")
         + f"只返回合法 JSON，不要 Markdown。字段结构：{json.dumps(schema, ensure_ascii=False)}\n\n已勾选的图片和关联产品资料：\n" + "\n\n".join(selected_context)[:40000]
     )
@@ -827,7 +827,7 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
             group = selected_groups[selection_id]
             item = matched_items.get(selection_id) or {
                 "name": Path(group["folder"]).name or Path(group["selected_path"]).stem or ("Unidentified product" if document_language == "en" else "待识别产品"),
-                "description": "", "colors": "", "size_breakdown": "", "configuration": "", "carton_spec": "", "carton_volume": "", "gross_weight": "", "net_weight": "", "quantity": "1", "moq": "0", "unit": "pairs", "unit_price": "0", "discount_percent": "0",
+                "description": "", "colors": "", "size_breakdown": "", "configuration": "", "carton_spec": "", "units_per_carton": "", "carton_quantity": "", "carton_volume": "", "gross_weight": "", "net_weight": "", "quantity": "1", "moq": "0", "unit": "pairs", "unit_price": "0", "discount_percent": "0",
                 "source": "Product details need review" if document_language == "en" else "未自动识别，请核对",
             }
             folder = group["folder"]

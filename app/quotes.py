@@ -27,6 +27,84 @@ def _money(value: Any, field: str, places: int) -> Decimal:
     return number.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
 
 
+def _first_number(value: Any) -> Decimal | None:
+    match = re.search(r"\d+(?:[.,]\d+)?", str(value or "").replace(",", ""))
+    if not match:
+        return None
+    try:
+        number = Decimal(match.group(0))
+        return number if number.is_finite() and number >= 0 else None
+    except InvalidOperation:
+        return None
+
+
+def logistics_totals(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sum shipment totals only when each selected line has enough carton data."""
+    cartons_total = Decimal("0")
+    volume_total = Decimal("0")
+    gross_total = Decimal("0")
+    net_total = Decimal("0")
+    unknown_cartons = unknown_volume = unknown_gross = unknown_net = 0
+    for item in items:
+        quantity = _first_number(item.get("quantity"))
+        explicit_cartons = _first_number(item.get("carton_quantity"))
+        if explicit_cartons == 0:
+            explicit_cartons = None
+        pack = _first_number(item.get("units_per_carton"))
+        carton_count = explicit_cartons if explicit_cartons is not None else None
+        if carton_count is None and quantity is not None and pack and pack > 0:
+            carton_count = (quantity / pack).to_integral_value(rounding="ROUND_CEILING")
+        if carton_count is None:
+            unknown_cartons += 1
+        else:
+            cartons_total += carton_count
+
+        volume_each = _first_number(item.get("carton_volume"))
+        if volume_each == 0:
+            volume_each = None
+        if volume_each is None:
+            dims = [_first_number(x) for x in re.split(r"\s*[×xX*]\s*", str(item.get("carton_spec", "")))[:3]]
+            if len(dims) == 3 and all(x is not None for x in dims):
+                dimension_text = str(item.get("carton_spec", "")).casefold()
+                divisor = Decimal("1000000") if "cm" in dimension_text else Decimal("1000000000") if "mm" in dimension_text else Decimal("1")
+                volume_each = dims[0] * dims[1] * dims[2] / divisor
+        if volume_each is None or carton_count is None:
+            unknown_volume += 1
+        else:
+            volume_total += volume_each * carton_count
+
+        for field, accumulator_name in (("gross_weight", "gross"), ("net_weight", "net")):
+            weight_each = _first_number(item.get(field))
+            if weight_each == 0:
+                weight_each = None
+            if weight_each is None or carton_count is None:
+                if accumulator_name == "gross":
+                    unknown_gross += 1
+                else:
+                    unknown_net += 1
+                continue
+            unit_text = str(item.get(field, "")).casefold()
+            if "lb" in unit_text or "lbs" in unit_text:
+                weight_each *= Decimal("0.45359237")
+            elif "g/" in unit_text or "克/" in unit_text:
+                weight_each /= Decimal("1000")
+            if accumulator_name == "gross":
+                gross_total += weight_each * carton_count
+            else:
+                net_total += weight_each * carton_count
+    count = len(items)
+    return {
+        "cartons": cartons_total if count and unknown_cartons == 0 else None,
+        "volume_cbm": volume_total if count and unknown_volume == 0 else None,
+        "gross_weight_kg": gross_total if count and unknown_gross == 0 else None,
+        "net_weight_kg": net_total if count and unknown_net == 0 else None,
+        "known_cartons": cartons_total, "known_volume_cbm": volume_total,
+        "known_gross_weight_kg": gross_total, "known_net_weight_kg": net_total,
+        "unknown_cartons": unknown_cartons, "unknown_volume": unknown_volume,
+        "unknown_gross": unknown_gross, "unknown_net": unknown_net,
+    }
+
+
 def calculate_cost_breakdown(incoterm: str, values: dict[str, Decimal], shipping_term: str, insurance_term: str, tax_term: str) -> tuple[list[dict[str, Any]], Decimal]:
     """Apply seller-paid cost components using the selected trade term."""
     term = incoterm.strip().upper()
@@ -106,6 +184,8 @@ def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
             "size_breakdown": str(raw.get("size_breakdown", "")).strip()[:1000],
             "carton_spec": str(raw.get("carton_spec", "")).strip()[:200],
             "carton_volume": str(raw.get("carton_volume", "")).strip()[:100],
+            "units_per_carton": str(raw.get("units_per_carton", "")).strip()[:40],
+            "carton_quantity": str(raw.get("carton_quantity", "")).strip()[:40],
             "gross_weight": str(raw.get("gross_weight", "")).strip()[:100],
             "net_weight": str(raw.get("net_weight", "")).strip()[:100],
             "moq": str(moq),
@@ -178,6 +258,7 @@ def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
         "cost_breakdown": cost_breakdown,
         "total": str((subtotal + included_charges).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)),
         "items": normalized_items,
+        "logistics_totals": logistics_totals(normalized_items),
     }
     return data
 
@@ -232,6 +313,9 @@ def search_quotes(conn: sqlite3.Connection, query: str, document_types: set[str]
             "items": [{"name": item.get("name", ""), "description": item.get("description", ""),
                        "configuration": item.get("configuration", ""), "colors": item.get("colors", ""),
                        "size_breakdown": item.get("size_breakdown", ""), "moq": item.get("moq", ""),
+                       "carton_spec": item.get("carton_spec", ""), "carton_volume": item.get("carton_volume", ""),
+                       "units_per_carton": item.get("units_per_carton", ""), "carton_quantity": item.get("carton_quantity", ""),
+                       "gross_weight": item.get("gross_weight", ""), "net_weight": item.get("net_weight", ""),
                        "quantity": item.get("quantity", ""), "unit": item.get("unit", ""),
                        "unit_price": item.get("unit_price", ""), "amount": item.get("amount", ""),
                        "source": item.get("source", "")} for item in items[:50]],
@@ -281,6 +365,32 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
     safe = lambda value: escape(str(value or "")).replace("\n", "<br/>")
     english = data.get("language") == "en"
     word = lambda zh, en: en if english else zh
+    totals = logistics_totals(data.get("items", []))
+    def logistics_label(value_key: str, subtotal_key: str, missing_key: str, unit: str, places: int = 3) -> str:
+        value = totals[value_key]
+        if value is not None:
+            return f"{value:.{places}f} {unit}".strip()
+        subtotal = totals[subtotal_key]
+        missing = totals[missing_key]
+        prefix = word("待补资料", "Pending data")
+        if subtotal > 0:
+            prefix += f" ({word('已知小计', 'known subtotal')} {subtotal:.{places}f} {unit})"
+        return f"{prefix} · {word('缺', 'missing')} {missing} {word('款箱规/重量数据', 'product line(s)')}"
+    carton_unit = word("箱", "cartons")
+    volume_unit = "m³"
+    weight_unit = "kg"
+    logistics_values = {
+        "total_cartons": logistics_label("cartons", "known_cartons", "unknown_cartons", carton_unit, 0),
+        "total_cbm": logistics_label("volume_cbm", "known_volume_cbm", "unknown_volume", volume_unit),
+        "total_gross_weight": logistics_label("gross_weight_kg", "known_gross_weight_kg", "unknown_gross", weight_unit),
+        "total_net_weight": logistics_label("net_weight_kg", "known_net_weight_kg", "unknown_net", weight_unit),
+    }
+    def logistics_table():
+        rows = [
+            [Paragraph(word("总箱数", "Total cartons"), small), Paragraph(safe(logistics_values["total_cartons"]), body), Paragraph(word("总体积 CBM", "Total volume CBM"), small), Paragraph(safe(logistics_values["total_cbm"]), body)],
+            [Paragraph(word("总毛重", "Total gross weight"), small), Paragraph(safe(logistics_values["total_gross_weight"]), body), Paragraph(word("总净重", "Total net weight"), small), Paragraph(safe(logistics_values["total_net_weight"]), body)],
+        ]
+        return Table(rows, colWidths=[27*mm, 63*mm, 30*mm, 58*mm], style=TableStyle([("BACKGROUND",(0,0),(-1,-1),colors.HexColor("#f2f6f1")),("VALIGN",(0,0),(-1,-1),"TOP"),("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#dce4dd")),("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5)]))
     if english:
         title_text = "PROFORMA INVOICE" if data.get("document_type") == "pi" else "QUOTATION"
     else:
@@ -317,6 +427,8 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
                 ("colors", "颜色", "Color"),
                 ("size_breakdown", "尺码配比", "Size Breakdown"),
                 ("carton_spec", "箱规", "Carton dimensions"),
+                ("units_per_carton", "单箱装量", "Units per carton"),
+                ("carton_quantity", "箱数", "Cartons"),
                 ("carton_volume", "单箱体积", "Volume per carton"),
                 ("gross_weight", "毛重", "Gross weight"),
                 ("net_weight", "净重", "Net weight"),
@@ -343,7 +455,7 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
     if template_path and template_path.is_file():
         from docx import Document
         template = Document(str(template_path))
-        items_text = "\n".join(f"{i}. {item['name']} | {item.get('description') or ''} | {item.get('colors') or ''} | {item.get('size_breakdown') or ''} | {item.get('configuration') or ''} | {word('箱规', 'Carton')}: {item.get('carton_spec') or '—'} | {word('单箱体积', 'Volume/carton')}: {item.get('carton_volume') or '—'} | {word('毛重', 'Gross weight')}: {item.get('gross_weight') or '—'} | {word('净重', 'Net weight')}: {item.get('net_weight') or '—'} | {item['quantity']} {item['unit']} × {item['unit_price']} = {item['amount']} {data['currency']}" for i, item in enumerate(data["items"], 1))
+        items_text = "\n".join(f"{i}. {item['name']} | {item.get('description') or ''} | {item.get('colors') or ''} | {item.get('size_breakdown') or ''} | {item.get('configuration') or ''} | {word('箱规', 'Carton')}: {item.get('carton_spec') or '—'} | {word('装箱数', 'Units/carton')}: {item.get('units_per_carton') or '—'} | {word('箱数', 'Cartons')}: {item.get('carton_quantity') or '—'} | {word('单箱体积', 'Volume/carton')}: {item.get('carton_volume') or '—'} | {word('毛重', 'Gross weight')}: {item.get('gross_weight') or '—'} | {word('净重', 'Net weight')}: {item.get('net_weight') or '—'} | {item['quantity']} {item['unit']} × {item['unit_price']} = {item['amount']} {data['currency']}" for i, item in enumerate(data["items"], 1))
         values = {
             "quote_no": quote_no, "document_no": quote_no, "customer": data.get("customer", ""),
             "customer_address": data.get("customer_address", ""), "quote_date": data.get("quote_date", ""),
@@ -362,6 +474,8 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
             "insurance_amount": data.get("insurance_amount", "0"), "destination_charges": data.get("destination_charges", "0"),
             "duties": data.get("duties", "0"), "other_fees": data["other_fees"], "total": data["total"],
             "tax_amount": data.get("tax_amount", "0"),
+            **logistics_values,
+            "logistics_summary": " / ".join(f"{label}: {value}" for label, value in ((word("总箱数", "Total cartons"), logistics_values["total_cartons"]), (word("总体积", "Total CBM"), logistics_values["total_cbm"]), (word("总毛重", "Total gross weight"), logistics_values["total_gross_weight"]), (word("总净重", "Total net weight"), logistics_values["total_net_weight"]))),
             "items": items_text, "notes": data.get("notes", ""), "document_title": title_text,
         }
         token = re.compile(r"\{\{\s*([a-z_]+)\s*\}\}")
@@ -380,6 +494,7 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
             if table_rows:
                 widths = [178*mm/max(1, len(table_rows[0]))] * len(table_rows[0])
                 story.extend([Table(table_rows, colWidths=widths, repeatRows=1, style=TableStyle([("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#dce4dd")),("VALIGN",(0,0),(-1,-1),"TOP"),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#eaf1eb")),("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5)])), Spacer(1, 3*mm)])
+        story.extend([Paragraph(word("物流汇总", "Shipment Summary"), body), Spacer(1, 2*mm), logistics_table(), Spacer(1, 4*mm)])
         story.extend(product_gallery())
         doc.build(story, onFirstPage=footer, onLaterPages=footer)
         return
@@ -392,7 +507,8 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
         [Paragraph(f"{word('客户地址', 'Customer Address')}: {safe(data.get('customer_address') or '—')}", body), Paragraph(f"{word('币种', 'Currency')}: {safe(data['currency'])}", right)],
     ]
     story.append(Table(meta, colWidths=[105*mm, 73*mm], style=TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("BOTTOMPADDING",(0,0),(-1,-1),5),("LINEBELOW",(0,-1),(-1,-1),0.6,colors.HexColor("#dce4dd"))])))
-    story.append(Spacer(1, 6*mm))
+    story.extend([Spacer(1, 3*mm), logistics_table(), Spacer(1, 4*mm)])
+    story.append(Spacer(1, 2*mm))
     rows = [[Paragraph(word("图片", "Image"), body), Paragraph(word("产品 / 型号", "Product / Model"), body), Paragraph(word("描述", "Description"), body), Paragraph(word("数量", "Quantity"), body), Paragraph(word("单价", "Unit Price"), body), Paragraph(word("折扣", "Discount"), body), Paragraph(word("金额", "Amount"), body)]]
     for item in data["items"]:
         details = item.get("description") or "—"
@@ -406,6 +522,8 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
             details += f"\n{word('尺码配比', 'Size Breakdown')}: {item['size_breakdown']}"
         for key, zh_label, en_label in (
             ("carton_spec", "箱规", "Carton dimensions"),
+            ("units_per_carton", "单箱装量", "Units per carton"),
+            ("carton_quantity", "箱数", "Cartons"),
             ("carton_volume", "单箱体积", "Volume per carton"),
             ("gross_weight", "毛重", "Gross weight"),
             ("net_weight", "净重", "Net weight"),

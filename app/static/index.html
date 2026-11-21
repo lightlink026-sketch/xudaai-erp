@@ -75,7 +75,7 @@
               <label>公司电话<input name="company_phone" type="tel" placeholder="公司联系电话"></label>
               <label>公司邮箱<input name="company_email" type="email" placeholder="公司邮箱（选填）"></label>
             </div>
-            <p class="template-hint">DOCX 模板可放在 data/templates（或 TEMPLATES_DIR）目录，也可在这里上传。占位符：{{customer}}、{{quote_no}}、{{items}}、{{subtotal}}、{{total}}、{{payment_terms}}、{{bank_details}}。英文单据请使用系统默认版式或英文 DOCX 模板；自定义模板正文会保留原文。</p>
+            <p class="template-hint">DOCX 模板可放在 data/templates（或 TEMPLATES_DIR）目录，也可在这里上传。占位符：{{customer}}、{{quote_no}}、{{items}}、{{subtotal}}、{{total}}、{{payment_terms}}、{{bank_details}}、{{total_cartons}}、{{total_cbm}}、{{total_gross_weight}}、{{total_net_weight}}、{{logistics_summary}}。系统会在自定义模板中自动附加物流汇总；缺少装箱数据时会标为待补资料。</p>
             <div class="quote-items-head"><h3>已选产品（每个勾选项单独一行，可调整数量）</h3><button id="quote-add-item" class="secondary" type="button">＋ 添加产品</button></div>
             <div id="quote-items"></div>
             </section>
