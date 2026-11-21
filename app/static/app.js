@@ -16,7 +16,7 @@ document.querySelectorAll('.nav').forEach((button) => {
     document.querySelectorAll('.nav,.tab-panel').forEach((item) => item.classList.remove('active'));
     button.classList.add('active');
     $('#' + button.dataset.tab).classList.add('active');
-    $('#page-title').textContent = { ask: 'AI 对话', image: '以图搜图', manage: '资料同步' }[button.dataset.tab];
+    $('#page-title').textContent = { ask: 'AI 对话', manage: '资料同步' }[button.dataset.tab];
     if (button.dataset.tab === 'manage') loadStatus();
   };
 });
@@ -108,6 +108,11 @@ $('#chat-form').onsubmit = async (event) => {
 
   const imageUrl = image ? URL.createObjectURL(image) : '';
   const userText = message || '请识别这张图片，并查找资料库中的相关产品信息。';
+  // Clear the composer as soon as the user sends, even if the model request fails.
+  $('#chat-message').value = '';
+  selectedChatImage = null;
+  $('#chat-image').value = '';
+  renderAttachment();
   addMessage('user', userText, imageUrl);
   const pending = addMessage('assistant', '正在检索产品资料…');
   pending.classList.add('pending');
@@ -127,10 +132,6 @@ $('#chat-form').onsubmit = async (event) => {
     renderReferences(reply, data);
     chatHistory.push({ role: 'user', content: userText }, { role: 'assistant', content: data.answer || '' });
     chatHistory = chatHistory.slice(-12);
-    $('#chat-message').value = '';
-    selectedChatImage = null;
-    $('#chat-image').value = '';
-    renderAttachment();
   } catch (error) {
     pending.remove();
     addMessage('assistant', error.message || '暂时无法回答，请检查模型设置和服务状态。');
@@ -299,32 +300,6 @@ $('#test-model').onclick = async () => {
     state.textContent = `${data.message} · ${data.model}`;
   } catch (error) {
     state.textContent = error.message || '测试失败';
-  }
-};
-
-$('#image-form [name=image]').onchange = (event) => {
-  const file = event.target.files[0];
-  if (file) {
-    const preview = $('#query-preview');
-    preview.src = URL.createObjectURL(file);
-    preview.hidden = false;
-  }
-};
-
-$('#image-form').onsubmit = async (event) => {
-  event.preventDefault();
-  const form = new FormData(event.target);
-  $('#image-head').hidden = false;
-  $('#image-meta').textContent = '正在匹配…';
-  $('#image-results').innerHTML = '';
-  try {
-    const response = await fetch('/api/search/image', { method: 'POST', body: form });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail);
-    $('#image-meta').textContent = `${data.results.length} 个候选 · ${data.method}`;
-    $('#image-results').innerHTML = data.results.map((item) => `<article class="image-card"><img src="${item.preview_url}" loading="lazy"><div><b title="${esc(item.path)}">${esc(item.name)}</b><span>相似度 ${(item.similarity * 100).toFixed(1)}%</span><a href="/api/files/${item.file_id}/open" target="_blank">打开原图 →</a></div></article>`).join('') || '<p class="file-path">图库中暂时没有可匹配的图片，请先同步资料。</p>';
-  } catch (error) {
-    toast(error.message || '图片搜索失败');
   }
 };
 

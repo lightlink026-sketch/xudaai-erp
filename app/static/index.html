@@ -7,7 +7,7 @@
 <body>
   <aside class="sidebar">
     <div class="brand"><div class="brand-mark">X</div><div><b>Xudaai</b><small>PRODUCT LIBRARY</small></div></div>
-    <nav><button class="nav active" data-tab="ask"><span>✧</span>AI 对话</button><button class="nav" data-tab="image"><span>▧</span>以图搜图</button><button class="nav" data-tab="manage"><span>↻</span>资料同步</button></nav>
+    <nav><button class="nav active" data-tab="ask"><span>✧</span>AI 对话</button><button class="nav" data-tab="manage"><span>↻</span>资料同步</button></nav>
     <div class="side-foot"><i class="dot"></i><span>本机资料库</span><small id="side-count">载入中</small></div>
   </aside>
   <main>
@@ -43,12 +43,6 @@
         </form>
         <p class="model-dialog-note">模型服务商会收到你发送的问题、图片和命中的资料片段。API Key 仅保存在本机应用数据目录。</p>
       </dialog>
-    </section>
-    <section class="tab-panel" id="image">
-      <div class="intro"><span class="eyebrow">VISUAL MATCH</span><h2>用图片查找相似图片</h2><p>上传产品图片，在本地图库中匹配重复或近似版本。</p></div>
-      <form id="image-form"><label class="dropzone" id="dropzone"><input type="file" name="image" accept="image/*" required><div class="upload-icon">↑</div><b>拖入图片，或点击选择文件</b><span>支持 JPG、PNG、WebP 等常见格式</span><img id="query-preview" hidden></label><button class="primary image-submit">查找相似图片 <span>→</span></button></form>
-      <div class="notice">已启用 OpenCLIP 视觉相似检索，可查找外观相近或不同角度的产品图片；请结合文件名和资料来源核对型号。</div>
-      <div class="result-head" id="image-head" hidden><b>匹配图片</b><span id="image-meta"></span></div><div id="image-results" class="image-grid"></div>
     </section>
     <section class="tab-panel" id="manage">
       <div class="intro"><span class="eyebrow">LIBRARY MAINTENANCE</span><h2>资料同步</h2><p>将文件放入配置的资料目录，点击同步以增量更新索引。</p></div>

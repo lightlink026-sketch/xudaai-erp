@@ -683,7 +683,11 @@ async def assistant_chat(
                 response.raise_for_status()
                 answer_text = response.json()["choices"][0]["message"]["content"]
         except httpx.HTTPStatusError as e:
-            raise HTTPException(502, f"模型服务返回 HTTP {e.response.status_code}；图片对话需要支持视觉输入的模型。")
+            if e.response.status_code == 401:
+                raise HTTPException(401, "模型服务认证失败。请检查这条模型配置中的 API Key。")
+            if query_image is not None and e.response.status_code == 400:
+                raise HTTPException(502, "模型拒绝了图片请求。请确认模型名称正确，并且硅基流动模型目录标注了“视觉”能力。")
+            raise HTTPException(502, f"模型服务返回 HTTP {e.response.status_code}，请检查该模型配置。")
         except (httpx.HTTPError, KeyError, IndexError, TypeError):
             raise HTTPException(502, "无法连接模型服务或模型未返回有效回答，请检查模型设置。")
     elif sources:
