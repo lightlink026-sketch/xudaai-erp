@@ -529,10 +529,20 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
             parent = Path(file_row["path"]).parent.as_posix()
             group = selected_groups.setdefault(parent, {"folder": parent, "images": [], "docs": []})
             if file_row["ext"] in IMAGE_TYPES:
-                group["images"].append(file_row["name"])
+                group["images"].append({"id": file_row["id"], "name": file_row["name"], "path": file_row["path"]})
             else:
                 rows = c.execute("SELECT content,page FROM chunks WHERE file_id=? ORDER BY id LIMIT 12", (file_id,)).fetchall()
                 group["docs"].extend(f"{file_row['path']}（第 {row['page'] or '未标注'} 页）：{row['content'][:1200]}" for row in rows)
+                if parent not in {"", "."}:
+                    prefix = parent.rstrip("/") + "/"
+                    image_exts = tuple(IMAGE_TYPES)
+                    placeholders = ",".join("?" for _ in image_exts)
+                    image_row = c.execute(
+                        f"SELECT id,name,path FROM files WHERE status='ready' AND ext IN ({placeholders}) AND substr(path,1,?)=? ORDER BY name LIMIT 1",
+                        (*image_exts, len(prefix), prefix),
+                    ).fetchone()
+                    if image_row:
+                        group["images"].append({"id": image_row["id"], "name": image_row["name"], "path": image_row["path"]})
             # Selecting a product image associates it with the text and spreadsheet files
             # in that product folder. Group by folder so a photo set becomes one quote line.
             if file_row["ext"] in IMAGE_TYPES:
@@ -558,7 +568,7 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
                             rows = c.execute("SELECT content,page FROM chunks WHERE file_id=? AND content LIKE ? ORDER BY id LIMIT 8", (pricebook["id"], f"%{code}%")).fetchall()
                             group["docs"].extend(f"{pricebook['path']}（报价表，第 {row['page'] or '未标注'} 页）：{row['content'][:1600]}" for row in rows)
         for folder, group in selected_groups.items():
-            images = "、".join(dict.fromkeys(group["images"])) or "无"
+            images = "、".join(dict.fromkeys(item["name"] for item in group["images"])) or "无"
             excerpts = list(dict.fromkeys(group["docs"]))
             selected_context.append(f"产品目录：{folder}\n已选图片：{images}\n相关商品详情/报价资料：\n" + ("\n".join(excerpts[:32]) or "未找到关联文字资料"))
     if not selected_context:
@@ -602,11 +612,19 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
                     item["quantity"] = item.get("moq") or "1"
                 model_source = str(item.get("source", "")).strip()
                 item["source"] = folder if not model_source or model_source == "需人工核对" else f"{folder} · {model_source}"
+                representative_image = selected_groups[folder]["images"]
+                if representative_image:
+                    item["image_path"] = representative_image[0]["path"]
+                    item["image_file_id"] = representative_image[0]["id"]
                 item.pop("folder", None)
                 unique_items.append(item)
         for folder in folders:
             if folder not in used_folders:
-                unique_items.append({"name": Path(folder).name or "待识别产品", "description": "", "colors": "", "size_breakdown": "", "configuration": "", "quantity": "1", "moq": "0", "unit": "pairs", "unit_price": "0", "discount_percent": "0", "source": f"{folder} · 未自动识别，请核对"})
+                fallback = {"name": Path(folder).name or "待识别产品", "description": "", "colors": "", "size_breakdown": "", "configuration": "", "quantity": "1", "moq": "0", "unit": "pairs", "unit_price": "0", "discount_percent": "0", "source": f"{folder} · 未自动识别，请核对"}
+                if selected_groups[folder]["images"]:
+                    fallback["image_path"] = selected_groups[folder]["images"][0]["path"]
+                    fallback["image_file_id"] = selected_groups[folder]["images"][0]["id"]
+                unique_items.append(fallback)
         draft["items"] = unique_items
         return {"draft": draft}
     except httpx.HTTPStatusError as exc:
@@ -669,7 +687,7 @@ async def quote_update(quote_id: str, payload: dict[str, Any]) -> dict[str, Any]
 
 @app.post("/api/quotes/{quote_id}/pdf")
 def quote_generate_pdf(quote_id: str):
-    response = pdf_response(DB_PATH, quote_id, DATA_DIR / "quotes", TEMPLATES_DIR)
+    response = pdf_response(DB_PATH, quote_id, DATA_DIR / "quotes", TEMPLATES_DIR, LIBRARY_DIR)
     with db() as c:
         c.execute("UPDATE quotes SET status='issued',updated_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), quote_id))
     return response
@@ -677,7 +695,7 @@ def quote_generate_pdf(quote_id: str):
 
 @app.get("/api/quotes/{quote_id}/pdf")
 def quote_download_pdf(quote_id: str):
-    return pdf_response(DB_PATH, quote_id, DATA_DIR / "quotes", TEMPLATES_DIR)
+    return pdf_response(DB_PATH, quote_id, DATA_DIR / "quotes", TEMPLATES_DIR, LIBRARY_DIR)
 
 
 @app.get("/api/config/models")

@@ -9,6 +9,7 @@ import uuid
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 from xml.sax.saxutils import escape
 
@@ -50,8 +51,19 @@ def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
             raise HTTPException(422, f"第 {index} 行数量、单价或折扣超出范围")
         amount = (quantity * unit_price * (Decimal("1") - discount / Decimal("100"))).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
         subtotal += amount
+        image_path = str(raw.get("image_path", "")).strip().replace("\\", "/")[:1000]
+        try:
+            image_file_id = max(0, min(2_147_483_647, int(raw.get("image_file_id", 0) or 0)))
+        except (TypeError, ValueError):
+            image_file_id = 0
+        if image_path:
+            parsed_image_path = PurePosixPath(image_path)
+            if parsed_image_path.is_absolute() or ".." in parsed_image_path.parts:
+                raise HTTPException(422, f"第 {index} 行产品图片路径无效")
         normalized_items.append({
             "name": name,
+            "image_path": image_path,
+            "image_file_id": image_file_id,
             "description": str(raw.get("description", "")).strip()[:1500],
             "configuration": str(raw.get("configuration", "")).strip()[:1000],
             "colors": str(raw.get("colors", "")).strip()[:1000],
@@ -120,7 +132,7 @@ def list_quotes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return result
 
 
-def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_path: Path | None = None) -> None:
+def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_path: Path | None = None, library_dir: Path | None = None) -> None:
     try:
         from reportlab.lib import colors
         from reportlab.lib.enums import TA_CENTER, TA_RIGHT
@@ -129,7 +141,8 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
         from reportlab.lib.units import mm
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
-        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+        from reportlab.platypus import Image as PDFImage, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+        from PIL import Image as PILImage
     except ImportError as exc:
         raise HTTPException(503, "PDF 组件尚未安装，请安装 requirements.txt 后重启应用") from exc
 
@@ -158,6 +171,41 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
     story = []
     safe = lambda value: escape(str(value or "")).replace("\n", "<br/>")
     title_text = "形式发票 / PROFORMA INVOICE" if data.get("document_type") == "pi" else "产品报价单 / QUOTATION"
+    def product_photo(item: dict[str, Any], max_width: float = 23*mm, max_height: float = 23*mm):
+        relative = str(item.get("image_path", "")).strip()
+        if not relative or library_dir is None:
+            return Paragraph("—", small)
+        try:
+            image_path = (library_dir.resolve() / Path(*PurePosixPath(relative).parts)).resolve()
+            if not image_path.is_relative_to(library_dir.resolve()) or not image_path.is_file() or image_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif"}:
+                return Paragraph("图片不可用", small)
+            with PILImage.open(image_path) as source:
+                image = source.convert("RGB")
+                image.thumbnail((600, 600))
+                buffer = io.BytesIO()
+                image.save(buffer, format="JPEG", quality=84, optimize=True)
+                width, height = image.size
+            scale = min(max_width / width, max_height / height)
+            buffer.seek(0)
+            return PDFImage(buffer, width=width * scale, height=height * scale)
+        except Exception:
+            return Paragraph("图片不可用", small)
+
+    def product_gallery() -> list[Any]:
+        photo_items = [item for item in data["items"] if item.get("image_path")]
+        if not photo_items:
+            return []
+        gallery_rows = [[Paragraph("产品图片", body), Paragraph("产品 / 型号", body)]]
+        for item in photo_items:
+            gallery_rows.append([product_photo(item, 30*mm, 25*mm), Paragraph(safe(item["name"]), body)])
+        gallery = Table(gallery_rows, colWidths=[36*mm, 142*mm], repeatRows=1, hAlign="LEFT")
+        gallery.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#eaf1eb")),("FONTNAME",(0,0),(-1,-1),"QuoteCJK"),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#dce4dd")),
+            ("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),
+            ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
+        ]))
+        return [Paragraph("产品图片", body), Spacer(1, 2*mm), gallery, Spacer(1, 5*mm)]
     def footer(canvas, _doc):
         canvas.saveState()
         canvas.setFont("QuoteCJK", 7)
@@ -203,6 +251,7 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
             if table_rows:
                 widths = [178*mm/max(1, len(table_rows[0]))] * len(table_rows[0])
                 story.extend([Table(table_rows, colWidths=widths, repeatRows=1, style=TableStyle([("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#dce4dd")),("VALIGN",(0,0),(-1,-1),"TOP"),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#eaf1eb")),("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5)])), Spacer(1, 3*mm)])
+        story.extend(product_gallery())
         doc.build(story, onFirstPage=footer, onLaterPages=footer)
         return
     story.append(Paragraph(safe(title_text), title))
@@ -215,7 +264,7 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
     ]
     story.append(Table(meta, colWidths=[105*mm, 73*mm], style=TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("BOTTOMPADDING",(0,0),(-1,-1),5),("LINEBELOW",(0,-1),(-1,-1),0.6,colors.HexColor("#dce4dd"))])))
     story.append(Spacer(1, 6*mm))
-    rows = [[Paragraph("产品 / 型号", body), Paragraph("描述", body), Paragraph("数量", body), Paragraph("单价", body), Paragraph("折扣", body), Paragraph("金额", body)]]
+    rows = [[Paragraph("图片", body), Paragraph("产品 / 型号", body), Paragraph("描述", body), Paragraph("数量", body), Paragraph("单价", body), Paragraph("折扣", body), Paragraph("金额", body)]]
     for item in data["items"]:
         details = item.get("description") or "—"
         if item.get("source"):
@@ -229,11 +278,11 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
         if Decimal(item.get("moq", "0")) > 0:
             details += f"\nMOQ：{item['moq']} {item['unit']}"
         rows.append([
-            Paragraph(safe(item["name"]), body), Paragraph(safe(details), small),
+            product_photo(item), Paragraph(safe(item["name"]), body), Paragraph(safe(details), small),
             Paragraph(f"{safe(item['quantity'])} {safe(item['unit'])}", body), Paragraph(safe(item["unit_price"]), body),
             Paragraph(f"{safe(item['discount_percent'])}%", body), Paragraph(safe(item["amount"]), body),
         ])
-    table = Table(rows, colWidths=[39*mm, 51*mm, 22*mm, 22*mm, 18*mm, 26*mm], repeatRows=1, hAlign="LEFT")
+    table = Table(rows, colWidths=[26*mm, 30*mm, 40*mm, 20*mm, 20*mm, 16*mm, 20*mm], repeatRows=1, hAlign="LEFT")
     table.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#eaf1eb")),("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#244d3b")),
         ("FONTNAME",(0,0),(-1,-1),"QuoteCJK"),("VALIGN",(0,0),(-1,-1),"TOP"),
@@ -258,7 +307,7 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
 
 
-def pdf_response(db_path: Path, quote_id: str, quotes_dir: Path, templates_dir: Path | None = None) -> FileResponse:
+def pdf_response(db_path: Path, quote_id: str, quotes_dir: Path, templates_dir: Path | None = None, library_dir: Path | None = None) -> FileResponse:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT quote_no, data FROM quotes WHERE id=?", (quote_id,)).fetchone()
@@ -277,6 +326,6 @@ def pdf_response(db_path: Path, quote_id: str, quotes_dir: Path, templates_dir: 
     template_path = (templates_dir / template_name).resolve() if template_name else None
     if template_path and (not template_path.is_relative_to(templates_dir) or not template_path.is_file()):
         raise HTTPException(404, "这张单据引用的模板不存在，请重新选择模板")
-    render_pdf(data, row["quote_no"], output_path, template_path)
+    render_pdf(data, row["quote_no"], output_path, template_path, library_dir)
     filename = f"{row['quote_no']}.pdf"
     return FileResponse(output_path, media_type="application/pdf", filename=filename)
