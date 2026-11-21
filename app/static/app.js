@@ -15,11 +15,19 @@ document.querySelectorAll('.nav').forEach((button) => {
     document.querySelectorAll('.nav,.tab-panel').forEach((item) => item.classList.remove('active'));
     button.classList.add('active');
     $('#' + button.dataset.tab).classList.add('active');
-    $('#page-title').textContent = { ask: 'AI 对话', image: '以图搜图', manage: '资料同步', model: '模型设置' }[button.dataset.tab];
+    $('#page-title').textContent = { ask: 'AI 对话', image: '以图搜图', manage: '资料同步' }[button.dataset.tab];
     if (button.dataset.tab === 'manage') loadStatus();
-    if (button.dataset.tab === 'model') loadModelConfig();
   };
 });
+
+$('#open-model-settings').onclick = async () => {
+  await loadModelConfig();
+  $('#model-dialog').showModal();
+};
+$('#close-model-settings').onclick = () => $('#model-dialog').close();
+$('#model-dialog').onclick = (event) => {
+  if (event.target === $('#model-dialog')) $('#model-dialog').close();
+};
 
 $('#chat-image').onchange = (event) => {
   selectedChatImage = event.target.files[0] || null;
@@ -175,6 +183,7 @@ $('#model-form').onsubmit = async (event) => {
     $('#model-form [name=clear_api_key]').checked = false;
     $('#model-state').textContent = '已保存';
     toast('模型设置已保存');
+    await loadStatus();
   } catch (error) {
     $('#model-state').textContent = error.message || '保存失败';
   }
@@ -265,6 +274,7 @@ async function loadStatus() {
     $('#total-files').textContent = data.total_files;
     $('#error-files').textContent = data.errors;
     $('#last-indexed').textContent = data.last_indexed ? new Date(data.last_indexed).toLocaleString() : '暂无';
+    $('#chat-model-status').textContent = data.answer_enabled ? `${data.model_provider} · 已启用` : 'AI 尚未配置';
   } catch (_) { /* Keep the static shell available while offline. */ }
 }
 
