@@ -892,7 +892,7 @@ async def answer(payload: dict[str, Any]):
     return {"answer": answer_text, "sources": found, "model": model}
 
 
-def image_matches(query_image: Image.Image, limit: int = 12, min_similarity: float = 0.0) -> dict[str, Any]:
+def image_matches(query_image: Image.Image, limit: int = 50, min_similarity: float = 0.0) -> dict[str, Any]:
     query_hash = imagehash.phash(query_image)
     min_similarity = max(0.0, min(0.8, min_similarity))
     results = []
@@ -970,7 +970,7 @@ async def assistant_chat(
             query_image = Image.open(io.BytesIO(raw_image)).convert("RGB")
         except Exception:
             raise HTTPException(400, "Unsupported or invalid image")
-        matches = image_matches(query_image, 8, image_threshold)
+        matches = image_matches(query_image, 50, image_threshold)
         image_results, image_method = matches["results"], matches["method"]
 
     text_results = text_search(q=question, limit=8)["results"] if question else []
@@ -1046,7 +1046,7 @@ async def assistant_chat(
 
 
 @app.post("/api/search/image")
-async def image_search(image: UploadFile = File(...), limit: int = Form(12), min_similarity: float = Form(default=0.0)) -> dict[str, Any]:
+async def image_search(image: UploadFile = File(...), limit: int = Form(50), min_similarity: float = Form(default=0.0)) -> dict[str, Any]:
     raw = await image.read(MAX_UPLOAD + 1)
     if len(raw) > MAX_UPLOAD:
         raise HTTPException(413, f"Image exceeds {MAX_UPLOAD // 1024 // 1024} MB")
