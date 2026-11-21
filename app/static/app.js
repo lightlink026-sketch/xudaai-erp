@@ -2,6 +2,9 @@ const $ = (selector) => document.querySelector(selector);
 let chatHistory = [];
 let currentWorkspace = localStorage.getItem('xudaai-workspace') || 'product';
 let currentConversationId = '';
+const workspaceStates = (() => { try { return JSON.parse(localStorage.getItem('xudaai-workspace-states') || '{}'); } catch (_) { return {}; } })();
+let workspaceInitialized = false;
+let workspaceSwitchToken = 0;
 let selectedChatImage = null;
 let modelHasSavedKey = false;
 const quoteCandidates = new Map();
@@ -39,27 +42,44 @@ document.querySelectorAll('.nav').forEach((button) => {
 document.querySelectorAll('[data-workspace]').forEach((button) => button.onclick = () => setWorkspace(button.dataset.workspace));
 $('#new-conversation').onclick = () => startWorkspaceConversation();
 $('#conversation-select').onchange = async (event) => {
-  if (!event.target.value) return;
+  if (!event.target.value) { startWorkspaceConversation(); return; }
+  const workspace = currentWorkspace;
+  const conversationId = event.target.value;
   try {
-    const response = await fetch(`/api/conversations/${encodeURIComponent(event.target.value)}`);
+    const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}`);
     const data = await response.json(); if (!response.ok) throw new Error(data.detail || '读取对话失败');
+    if (workspace !== currentWorkspace || conversationId !== $('#conversation-select').value) return;
     currentConversationId = data.conversation.id;
     chatHistory = data.conversation.messages || [];
+    rememberWorkspaceState();
     renderWorkspaceConversation();
   } catch (error) { toast(error.message); }
 };
 
 function setWorkspace(workspace) {
   if (!workspaceInfo[workspace]) return;
-  currentWorkspace = workspace; currentConversationId = ''; chatHistory = [];
+  if (workspaceInitialized) rememberWorkspaceState();
+  workspaceInitialized = true;
+  const switchToken = ++workspaceSwitchToken;
+  currentWorkspace = workspace;
   localStorage.setItem('xudaai-workspace', workspace);
   document.querySelectorAll('[data-workspace]').forEach((button) => button.classList.toggle('active', button.dataset.workspace === workspace));
   const [name, description, placeholder] = workspaceInfo[workspace];
   $('#workspace-description').textContent = description;
   $('#chat-message').placeholder = placeholder;
   $('#conversation-select').value = '';
-  startWorkspaceConversation(false);
-  loadWorkspaceConversations();
+  const saved = workspaceStates[workspace];
+  if (saved) {
+    currentConversationId = saved.id || '';
+    chatHistory = Array.isArray(saved.messages) ? saved.messages : [];
+    if (chatHistory.length) renderWorkspaceConversation();
+    else showWorkspaceWelcome(name, description);
+    loadWorkspaceConversations({ switchToken, restoreLatest: false });
+  } else {
+    currentConversationId = ''; chatHistory = [];
+    showWorkspaceWelcome(name, description);
+    loadWorkspaceConversations({ switchToken, restoreLatest: true });
+  }
   if (workspace === 'rules') loadTeamRules();
 }
 
@@ -67,8 +87,36 @@ function startWorkspaceConversation(focus = true) {
   currentConversationId = ''; chatHistory = [];
   $('#conversation-select').value = '';
   const [name, description] = workspaceInfo[currentWorkspace];
-  $('#chat-thread').innerHTML = `<div class="chat-welcome"><div class="assistant-mark">✧</div><div><b>你好，我是${esc(name)}</b><p>${esc(description)}</p></div></div>`;
+  showWorkspaceWelcome(name, description);
+  rememberWorkspaceState();
   if (focus) $('#chat-message').focus();
+}
+
+function showWorkspaceWelcome(name, description) {
+  $('#chat-thread').innerHTML = `<div class="chat-welcome"><div class="assistant-mark">✧</div><div><b>你好，我是${esc(name)}</b><p>${esc(description)}</p></div></div>`;
+}
+
+function rememberWorkspaceState(workspace = currentWorkspace, id = currentConversationId, messages = chatHistory) {
+  workspaceStates[workspace] = { id, messages: messages.slice(-100) };
+  try { localStorage.setItem('xudaai-workspace-states', JSON.stringify(workspaceStates)); } catch (_) { /* Shared server history remains available if browser storage is full. */ }
+}
+
+async function saveSharedConversation(workspace, id, messages) {
+  try {
+    const response = await fetch('/api/conversations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, workspace, messages }) });
+    if (!response.ok) return;
+    const data = await response.json();
+    rememberWorkspaceState(workspace, data.conversation.id, messages);
+    if (workspace === currentWorkspace) { currentConversationId = data.conversation.id; await loadWorkspaceConversations(); }
+  } catch (_) { /* Browser-local history still preserves the conversation. */ }
+}
+
+function appendWorkspaceMessage(workspace, content) {
+  const state = workspaceStates[workspace] || { id: workspace === currentWorkspace ? currentConversationId : '', messages: workspace === currentWorkspace ? chatHistory : [] };
+  const messages = [...(state.messages || []), { role: 'assistant', content }].slice(-12);
+  rememberWorkspaceState(workspace, state.id, messages);
+  if (workspace === currentWorkspace) chatHistory = messages;
+  return saveSharedConversation(workspace, state.id, messages);
 }
 
 function renderWorkspaceConversation() {
@@ -76,19 +124,36 @@ function renderWorkspaceConversation() {
   chatHistory.forEach((message) => addMessage(message.role, message.content));
 }
 
-async function loadWorkspaceConversations() {
+async function loadWorkspaceConversations({ switchToken = workspaceSwitchToken, restoreLatest = false } = {}) {
+  const workspace = currentWorkspace;
   const select = $('#conversation-select');
   try {
-    const response = await fetch(`/api/conversations?workspace=${encodeURIComponent(currentWorkspace)}&limit=100`);
+    const response = await fetch(`/api/conversations?workspace=${encodeURIComponent(workspace)}&limit=100`);
     const data = await response.json(); if (!response.ok) return;
+    if (workspace !== currentWorkspace || switchToken !== workspaceSwitchToken) return;
     select.innerHTML = '<option value="">新对话</option>' + (data.conversations || []).map((item) => `<option value="${esc(item.id)}">${esc(item.title)} · ${new Date(item.updated_at).toLocaleString()}</option>`).join('');
-    if (currentConversationId) select.value = currentConversationId;
+    let targetId = currentConversationId;
+    if (!targetId && restoreLatest && !workspaceStates[workspace]) targetId = data.conversations?.[0]?.id || '';
+    if (targetId && select.querySelector(`option[value="${CSS.escape(targetId)}"]`)) {
+      select.value = targetId;
+      if (restoreLatest && !chatHistory.length) {
+        const conversationResponse = await fetch(`/api/conversations/${encodeURIComponent(targetId)}`);
+        const conversationData = await conversationResponse.json();
+        if (workspace !== currentWorkspace || switchToken !== workspaceSwitchToken) return;
+        if (conversationResponse.ok) {
+          currentConversationId = conversationData.conversation.id;
+          chatHistory = conversationData.conversation.messages || [];
+          rememberWorkspaceState(); renderWorkspaceConversation();
+        }
+      }
+    } else if (!targetId) select.value = '';
   } catch (_) { /* Local chat remains usable when the shared store is offline. */ }
 }
 
 $('#workspace-upload').onchange = async (event) => {
   const files = [...event.target.files];
   if (!files.length) return;
+  const uploadWorkspace = currentWorkspace;
   const reply = addMessage('assistant', `正在把 ${files.length} 个文件加入${workspaceInfo[currentWorkspace][0]}资料库…`);
   try {
     const form = new FormData(); files.forEach((file) => form.append('files', file));
@@ -100,8 +165,9 @@ $('#workspace-upload').onchange = async (event) => {
     const data = await response.json(); if (!response.ok) throw new Error(data.detail || '上传失败');
     const summary = endpoint.endsWith('/import') ? `已从 ${data.source_file} 导入 ${data.imported} 条运费规则。` : `已上传并索引 ${data.uploaded || 0} 个文件。${data.files?.filter((f) => f.status === 'error').length ? '部分文件解析失败，请查看同步记录。' : ''}`;
     reply.querySelector('.message-text').textContent = summary;
-    await loadStatus();
-    chatHistory.push({ role: 'assistant', content: summary });
+    if (uploadWorkspace === currentWorkspace) await loadStatus();
+    await appendWorkspaceMessage(uploadWorkspace, summary);
+    rememberWorkspaceState();
   } catch (error) { reply.querySelector('.message-text').textContent = error.message; }
   finally { event.target.value = ''; }
 };
@@ -245,6 +311,7 @@ $('#chat-thread').addEventListener('click', async (event) => {
   if (!button) return;
   const action = pendingActions.get(button.dataset.executeAction);
   if (!action) return;
+  const actionWorkspace = currentWorkspace;
   if (action.type.endsWith('.delete') && !window.confirm('确认删除这条业务记录？此操作会写入团队审计日志。')) return;
   button.disabled = true; button.textContent = '正在执行…';
   try {
@@ -273,8 +340,7 @@ $('#chat-thread').addEventListener('click', async (event) => {
     if (result.quote_draft?.id) {
       const openQuote = document.createElement('button'); openQuote.type = 'button'; openQuote.className = 'secondary'; openQuote.dataset.openQuoteDraft = result.quote_draft.id; openQuote.textContent = `打开草稿 ${result.quote_draft.quote_no}`; resultBox.append(document.createElement('br'), openQuote);
     }
-    chatHistory.push({ role: 'assistant', content: summary });
-    if (currentConversationId) await fetch('/api/conversations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: currentConversationId, workspace: currentWorkspace, messages: chatHistory }) });
+    await appendWorkspaceMessage(actionWorkspace, summary);
   } catch (error) {
     button.disabled = false; button.textContent = '重试执行';
     button.closest('.assistant-action-card').querySelector('span').textContent = error.message;
@@ -326,18 +392,23 @@ $('#chat-form').onsubmit = async (event) => {
 
   const imageUrl = image ? URL.createObjectURL(image) : '';
   const userText = message || '请识别这张图片，并查找资料库中的相关产品信息。';
+  const requestWorkspace = currentWorkspace;
+  const requestConversationId = currentConversationId;
   // Clear the composer as soon as the user sends, even if the model request fails.
   $('#chat-message').value = '';
   selectedChatImage = null;
   $('#chat-image').value = '';
   renderAttachment();
   addMessage('user', userText, imageUrl);
+  const historyForRequest = chatHistory.slice(-8);
+  chatHistory.push({ role: 'user', content: userText });
+  rememberWorkspaceState();
   const pending = addMessage('assistant', '正在检索产品资料…');
   pending.classList.add('pending');
   $('#chat-send').disabled = true;
   const form = new FormData();
   form.append('message', message);
-  form.append('history', JSON.stringify(chatHistory.slice(-8)));
+  form.append('history', JSON.stringify(historyForRequest));
   form.append('model_id', $('#chat-model-select').value || 'local');
   form.append('workspace', currentWorkspace);
   form.append('conversation_id', currentConversationId);
@@ -349,17 +420,24 @@ $('#chat-form').onsubmit = async (event) => {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || '对话请求失败');
     pending.remove();
-    const reply = addMessage('assistant', data.answer || '没有生成回答。');
-    renderReferences(reply, data);
-    chatHistory.push({ role: 'user', content: userText }, { role: 'assistant', content: data.answer || '' });
-    chatHistory = chatHistory.slice(-12);
-    try {
-      const saved = await fetch('/api/conversations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: currentConversationId, workspace: currentWorkspace, messages: chatHistory }) });
-      if (saved.ok) { const savedData = await saved.json(); currentConversationId = savedData.conversation.id; await loadWorkspaceConversations(); }
-    } catch (_) { /* Preserve the successful model answer if shared history is unavailable. */ }
+    const answer = data.answer || '没有生成回答。';
+    const state = workspaceStates[requestWorkspace] || { id: requestConversationId, messages: historyForRequest };
+    const messages = [...(state.messages || []), ...(state.messages?.at(-1)?.content === userText ? [] : [{ role: 'user', content: userText }]), { role: 'assistant', content: answer }].slice(-12);
+    if (requestWorkspace === currentWorkspace) {
+      const reply = addMessage('assistant', answer);
+      renderReferences(reply, data);
+      chatHistory = messages;
+      rememberWorkspaceState(requestWorkspace, requestConversationId, chatHistory);
+    } else rememberWorkspaceState(requestWorkspace, requestConversationId, messages);
+    await saveSharedConversation(requestWorkspace, requestConversationId, messages);
   } catch (error) {
     pending.remove();
-    addMessage('assistant', error.message || '暂时无法回答，请检查模型设置和服务状态。');
+    const failure = error.message || '暂时无法回答，请检查模型设置和服务状态。';
+    const state = workspaceStates[requestWorkspace] || { id: requestConversationId, messages: historyForRequest };
+    const messages = [...(state.messages || []), { role: 'assistant', content: failure }].slice(-12);
+    if (requestWorkspace === currentWorkspace) { addMessage('assistant', failure); chatHistory = messages; }
+    rememberWorkspaceState(requestWorkspace, requestConversationId, messages);
+    await saveSharedConversation(requestWorkspace, requestConversationId, messages);
   } finally {
     $('#chat-send').disabled = false;
     $('#chat-message').focus();
