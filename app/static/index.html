@@ -7,22 +7,29 @@
 <body>
   <aside class="sidebar">
     <div class="brand"><div class="brand-mark">X</div><div><b>Xudaai</b><small>PRODUCT LIBRARY</small></div></div>
-    <nav><button class="nav active" data-tab="ask"><span>⌕</span>资料问答</button><button class="nav" data-tab="image"><span>▧</span>以图搜图</button><button class="nav" data-tab="manage"><span>↻</span>资料同步</button><button class="nav" data-tab="model"><span>⚙</span>模型设置</button></nav>
+    <nav><button class="nav active" data-tab="ask"><span>✧</span>AI 对话</button><button class="nav" data-tab="image"><span>▧</span>以图搜图</button><button class="nav" data-tab="manage"><span>↻</span>资料同步</button><button class="nav" data-tab="model"><span>⚙</span>模型设置</button></nav>
     <div class="side-foot"><i class="dot"></i><span>本机资料库</span><small id="side-count">载入中</small></div>
   </aside>
   <main>
-    <header><div><span class="eyebrow">PRODUCT KNOWLEDGE</span><h1 id="page-title">资料问答</h1></div><div class="header-right"><span class="pill"><i class="dot"></i> 本地运行</span><div class="avatar">X</div></div></header>
+    <header><div><span class="eyebrow">PRODUCT KNOWLEDGE</span><h1 id="page-title">AI 对话</h1></div><div class="header-right"><span class="pill"><i class="dot"></i> 本地运行</span><div class="avatar">X</div></div></header>
     <section class="tab-panel active" id="ask">
-      <div class="intro"><span class="eyebrow">SEARCH YOUR LIBRARY</span><h2>快速找到产品资料</h2><p>输入型号、产品名称或问题，搜索本地已索引的说明书与资料。</p></div>
-      <form id="text-form" class="searchbox"><span class="search-icon">⌕</span><input name="q" placeholder="例如：X200 支持哪些接口？" required><button class="primary">搜索资料 <span>→</span></button></form>
-      <div class="suggestions"><span>试试搜索</span><button data-query="安装说明">安装说明</button><button data-query="产品参数">产品参数</button><button data-query="配件清单">配件清单</button></div>
-      <div class="result-head" id="text-head" hidden><b>检索结果</b><span id="text-meta"></span></div><div id="text-results" class="results"></div>
-      <div class="empty-state" id="ask-empty"><div class="empty-icon">⌕</div><b>从你的资料开始搜索</b><span>搜索结果会附上来源文件，方便核对原文。</span></div>
+      <div class="chat-shell">
+        <div class="chat-intro"><span class="eyebrow">PRODUCT KNOWLEDGE ASSISTANT</span><h2>产品资料 AI 助手</h2><p>直接提问，或附上一张产品图片。我会检索资料库并列出来源。</p></div>
+        <div id="chat-thread" class="chat-thread" aria-live="polite">
+          <div class="chat-welcome"><div class="assistant-mark">✧</div><div><b>你好，我可以帮你查产品资料</b><p>试试问“这个产品有哪些配件？”或上传图片后问“帮我找这款产品的参数”。</p></div></div>
+        </div>
+        <form id="chat-form" class="chat-composer">
+          <div id="chat-attachment" class="chat-attachment" hidden></div>
+          <textarea id="chat-message" name="message" rows="2" placeholder="输入产品型号、问题，或说明你想从图片中查什么…"></textarea>
+          <div class="composer-actions"><label class="attach-button" title="附加产品图片">＋ 图片<input id="chat-image" type="file" accept="image/*" hidden></label><span class="composer-hint">可只发图片；回答会附资料来源</span><button id="chat-send" class="primary">发送 <span>↑</span></button></div>
+        </form>
+        <div class="privacy-hint">本地检索在你的电脑完成。启用 AI 问答后，问题、图片和命中的资料片段会发送给你配置的模型服务商。</div>
+      </div>
     </section>
     <section class="tab-panel" id="image">
       <div class="intro"><span class="eyebrow">VISUAL MATCH</span><h2>用图片查找相似图片</h2><p>上传产品图片，在本地图库中匹配重复或近似版本。</p></div>
       <form id="image-form"><label class="dropzone" id="dropzone"><input type="file" name="image" accept="image/*" required><div class="upload-icon">↑</div><b>拖入图片，或点击选择文件</b><span>支持 JPG、PNG、WebP 等常见格式</span><img id="query-preview" hidden></label><button class="primary image-submit">查找相似图片 <span>→</span></button></form>
-      <div class="notice">当前版本使用感知哈希，适合查找相同图片的压缩、缩放或轻微变化版本；不同角度/外观相似的语义搜索将在后续接入视觉向量模型。</div>
+      <div class="notice">已启用 OpenCLIP 视觉相似检索，可查找外观相近或不同角度的产品图片；请结合文件名和资料来源核对型号。</div>
       <div class="result-head" id="image-head" hidden><b>匹配图片</b><span id="image-meta"></span></div><div id="image-results" class="image-grid"></div>
     </section>
     <section class="tab-panel" id="manage">

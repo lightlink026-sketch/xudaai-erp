@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import io
+import base64
 import asyncio
 import json
 import os
@@ -451,16 +452,8 @@ async def answer(payload: dict[str, Any]):
     return {"answer": answer_text, "sources": found, "model": model}
 
 
-@app.post("/api/search/image")
-async def image_search(image: UploadFile = File(...), limit: int = Form(12)) -> dict[str, Any]:
-    raw = await image.read(MAX_UPLOAD + 1)
-    if len(raw) > MAX_UPLOAD:
-        raise HTTPException(413, f"Image exceeds {MAX_UPLOAD // 1024 // 1024} MB")
-    try:
-        query_image = Image.open(io.BytesIO(raw)).convert("RGB")
-        query_hash = imagehash.phash(query_image)
-    except Exception:
-        raise HTTPException(400, "Unsupported or invalid image")
+def image_matches(query_image: Image.Image, limit: int = 12) -> dict[str, Any]:
+    query_hash = imagehash.phash(query_image)
     results = []
     mode = os.getenv("IMAGE_SEARCH_MODE", "phash").lower()
     if mode == "clip":
@@ -485,6 +478,127 @@ async def image_search(image: UploadFile = File(...), limit: int = Form(12)) -> 
         results.sort(key=lambda x:x["distance"])
         method = "pHash near-duplicate matching"
     return {"results":results[:max(1,min(limit,50))],"method":method}
+
+
+def related_text_for_images(matches: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    """Find documents stored beside visually matching product images."""
+    found: list[dict[str, Any]] = []
+    seen: set[tuple[int, int | None]] = set()
+    image_exts = tuple(IMAGE_TYPES)
+    placeholders = ",".join("?" for _ in image_exts)
+    with db() as c:
+        for match in matches[:6]:
+            parent = Path(match["path"]).parent.as_posix()
+            prefix = "" if parent == "." else parent + "/"
+            rows = c.execute(
+                f"SELECT f.id file_id,f.name,f.path,f.ext,x.page,x.content FROM files f JOIN chunks x ON x.file_id=f.id WHERE f.status='ready' AND f.ext NOT IN ({placeholders}) AND (?='' OR substr(f.path,1,?)=?) ORDER BY f.name LIMIT 12",
+                (*image_exts, prefix, len(prefix), prefix),
+            ).fetchall()
+            for row in rows:
+                key = (row["file_id"], row["page"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append({"file_id": row["file_id"], "name": row["name"], "path": row["path"], "ext": row["ext"], "page": row["page"], "snippet": row["content"][:700]})
+                if len(found) >= limit:
+                    return found
+    return found
+
+
+@app.post("/api/assistant/chat")
+async def assistant_chat(
+    message: str = Form(default=""),
+    image: UploadFile | None = File(default=None),
+    history: str = Form(default="[]"),
+) -> dict[str, Any]:
+    """Chat over local product documents, optionally grounded by a submitted image."""
+    question = message.strip()[:3000]
+    raw_image: bytes | None = None
+    query_image: Image.Image | None = None
+    image_results: list[dict[str, Any]] = []
+    image_method = ""
+    if image is not None:
+        raw_image = await image.read(MAX_UPLOAD + 1)
+        if len(raw_image) > MAX_UPLOAD:
+            raise HTTPException(413, f"Image exceeds {MAX_UPLOAD // 1024 // 1024} MB")
+        try:
+            query_image = Image.open(io.BytesIO(raw_image)).convert("RGB")
+        except Exception:
+            raise HTTPException(400, "Unsupported or invalid image")
+        matches = image_matches(query_image, 8)
+        image_results, image_method = matches["results"], matches["method"]
+
+    text_results = text_search(q=question, limit=8)["results"] if question else []
+    related_results = related_text_for_images(image_results) if image_results else []
+    sources: list[dict[str, Any]] = []
+    seen_sources: set[tuple[int, int | None]] = set()
+    for source in [*text_results, *related_results]:
+        key = (source["file_id"], source.get("page"))
+        if key not in seen_sources:
+            seen_sources.add(key)
+            sources.append(source)
+    sources = sources[:12]
+
+    cfg = model_config()
+    configured = bool(cfg["api_key"]) or cfg["provider"] == "ollama"
+    model = cfg["model"]
+    answer_text = ""
+    if configured:
+        context_items = [f"[资料 {i+1}] 文件：{x['path']}；页码：{x.get('page') or '未标注'}\n{x['snippet']}" for i, x in enumerate(sources)]
+        context_items.extend(f"[相似图片 {i+1}] 文件：{x['path']}；视觉相似度：{x.get('similarity', 0):.3f}" for i, x in enumerate(image_results[:8]))
+        context = "\n\n".join(context_items) or "本地资料库没有找到可引用的文字资料。"
+        prompt = f"当前问题：{question or '请识别图片并在产品资料库中查找相关信息。'}\n\n本地检索结果（只能把这些作为产品事实依据）：\n{context}\n\n请用中文直接回答。对检索不到的参数或价格明确说资料不足，不要猜测；在结尾列出引用文件名。可以描述你从图片看到的内容，但要区分视觉观察和资料库确认的信息。"
+        try:
+            history_items = json.loads(history)
+        except (json.JSONDecodeError, TypeError):
+            history_items = []
+        messages: list[dict[str, Any]] = [{"role": "system", "content": "你是产品资料助手。回答优先依据检索到的用户资料；不要编造型号、参数、价格、库存、运费或合同条款。资料不足时明确说明。用户上传的图片可用于识别和检索，但不能凭外观确认未展示的具体参数。"}]
+        if isinstance(history_items, list):
+            for item in history_items[-8:]:
+                if isinstance(item, dict) and item.get("role") in {"user", "assistant"}:
+                    content = str(item.get("content", ""))[:3000]
+                    if content:
+                        messages.append({"role": item["role"], "content": content})
+        user_content: Any = prompt
+        if query_image is not None and raw_image is not None:
+            # Downscale before sending to a model endpoint to keep requests manageable.
+            resized = query_image.copy()
+            resized.thumbnail((1200, 1200))
+            buffer = io.BytesIO()
+            resized.save(buffer, format="JPEG", quality=82, optimize=True)
+            image_url = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+            user_content = [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": image_url}}]
+        messages.append({"role": "user", "content": user_content})
+        headers = {"Authorization": f"Bearer {cfg['api_key']}"} if cfg["api_key"] else {}
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(f"{cfg['base_url'].rstrip('/')}/chat/completions", headers=headers, json={"model": model, "temperature": 0.1, "messages": messages})
+                response.raise_for_status()
+                answer_text = response.json()["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(502, f"模型服务返回 HTTP {e.response.status_code}；图片对话需要支持视觉输入的模型。")
+        except (httpx.HTTPError, KeyError, IndexError, TypeError):
+            raise HTTPException(502, "无法连接模型服务或模型未返回有效回答，请检查模型设置。")
+    elif sources:
+        answer_text = "我在本地资料库找到以下相关内容：\n\n" + "\n\n".join(f"**{x['name']}**\n{x['snippet'][:400]}" for x in sources[:4]) + "\n\n配置支持的 AI 模型后，我可以继续综合这些资料回答问题。"
+    elif image_results:
+        answer_text = f"已完成本地图片检索（{image_method}），找到 {len(image_results)} 张相似图片。要让我直接分析图片并结合资料回答，请在“模型设置”中配置支持图片输入的模型。"
+    else:
+        answer_text = "我暂时没有在已索引资料里找到相关内容。可以试试产品型号、文件名里的关键词，或上传产品图片查找相似图片。"
+
+    return {"answer": answer_text, "sources": sources, "image_matches": image_results, "image_method": image_method, "model": model if configured else None, "used_ai": configured}
+
+
+@app.post("/api/search/image")
+async def image_search(image: UploadFile = File(...), limit: int = Form(12)) -> dict[str, Any]:
+    raw = await image.read(MAX_UPLOAD + 1)
+    if len(raw) > MAX_UPLOAD:
+        raise HTTPException(413, f"Image exceeds {MAX_UPLOAD // 1024 // 1024} MB")
+    try:
+        query_image = Image.open(io.BytesIO(raw)).convert("RGB")
+    except Exception:
+        raise HTTPException(400, "Unsupported or invalid image")
+    return image_matches(query_image, limit)
 
 
 @app.get("/api/files/{file_id}/preview")

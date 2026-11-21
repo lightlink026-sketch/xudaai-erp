@@ -5,10 +5,11 @@
 ## 当前版本
 
 - 本地网页：资料搜索、可选模型问答、以图搜图、资料上传和索引管理。
+- AI 对话：同一对话框支持文字问题和图片；图片先在本地用 OpenCLIP 找相似产品图，再取同目录文档与文字检索结果作为依据，并显示引用来源。配置支持视觉输入的模型后，可把图片和命中片段一并交给模型回答；未配置模型时仍可使用本地检索。
 - 增量索引：新建、修改、删除文件会在下次同步时更新；默认每 5 分钟扫描一次，也可在网页手动同步；未变更文件跳过。
 - 文档解析：PDF、DOCX、XLSX、PPTX、TXT、Markdown、CSV。
 - 图片索引：支持 pHash 近重复检索；设置 `IMAGE_SEARCH_MODE=clip` 并以 `ENABLE_CLIP=1` 构建后，使用 OpenCLIP 做语义/视觉相似检索。CLIP 首次使用会下载模型并消耗较多内存和存储，需确认 NAS CPU 架构有可用的 PyTorch wheel。
-- API：`/api/search/text`、`/api/search/image`、`/api/index/sync`、`/api/files/{id}/preview`。
+- API：`/api/assistant/chat`（文字/图片对话）、`/api/search/text`、`/api/search/image`、`/api/index/sync`、`/api/files/{id}/preview`。
 - 钉钉：使用官方 `dingtalk-stream` SDK 的 Stream 长连接机器人，配置企业内部应用 Client ID/Secret 即可启用；无需暴露公网回调。机器人复用统一检索和模型回答。
 - 模型设置页：可选 DeepSeek、OpenAI、任意 OpenAI 兼容服务或 Ollama，设置 Base URL、模型名和密钥，并测试连接。密钥保存在 `data/settings.json`，页面不回显。
 - 可选媒体处理：启用 `ENABLE_MEDIA_AI` 后，扫描件 PDF/图片可做 OCR，音视频可用 Faster Whisper 转写并按时间点检索。
@@ -57,6 +58,12 @@ docker compose up -d --build
 每个文件记录相对路径、大小、修改时间、SHA-256、状态和索引时间。同步使用 SHA-256 识别实际内容变化：新增/变化的文件重新解析，删除文件从索引移除，未变化文件跳过。解析失败保留错误信息，可修复源文件后再次同步。
 
 网页管理页支持手动增量同步、上传资料和状态查看；默认每 300 秒自动扫描一次（`SYNC_INTERVAL_SECONDS=0` 可关闭）。索引目录应定期备份；原始文件仍是权威数据源。
+
+## 报价、PI 与运费工作流
+
+AI 对话是统一的产品资料入口。后续业务单据可在此增加结构化工具：从商品报价表选产品和价格，确认币种、数量、买家与贸易条款后生成报价 PDF/PI；运费使用用户提供的费率表和明确的计费规则计算，并把采用的线路、重量/体积、阶梯价及结果列出来供核对。不能让模型凭自然语言猜价格或费率。
+
+当前资料目录中有多个商品报价表 XLSX/PDF，但未发现运费表或 PI 模板。接入这两类功能时，需要导入实际运费工作簿及其计费说明，并提供希望沿用的 PI/报价单模板、公司抬头和付款/贸易条款；也可以按新模板设计。
 
 ## API 示例
 
