@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import io
+import json
+import os
+import re
+import sqlite3
+import uuid
+from datetime import date
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from pathlib import Path
+from typing import Any
+from xml.sax.saxutils import escape
+
+from fastapi import HTTPException
+from fastapi.responses import FileResponse
+
+
+def _money(value: Any, field: str, places: int) -> Decimal:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise HTTPException(422, f"{field} 必须是有效数字")
+    if not number.is_finite() or abs(number) > Decimal("999999999999"):
+        raise HTTPException(422, f"{field} 超出允许范围")
+    return number.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+
+
+def normalize_quote(payload: dict[str, Any]) -> dict[str, Any]:
+    currency = str(payload.get("currency", "USD")).strip().upper()
+    if not re.fullmatch(r"[A-Z]{3}", currency):
+        raise HTTPException(422, "币种请使用三位代码，例如 USD、EUR 或 CNY")
+    places = 0 if currency == "JPY" else 2
+    items = payload.get("items")
+    if not isinstance(items, list) or not 1 <= len(items) <= 100:
+        raise HTTPException(422, "报价单需要 1 到 100 个产品明细")
+    normalized_items = []
+    subtotal = Decimal("0")
+    for index, raw in enumerate(items, 1):
+        if not isinstance(raw, dict):
+            raise HTTPException(422, f"第 {index} 行格式无效")
+        name = str(raw.get("name", "")).strip()[:200]
+        if not name:
+            raise HTTPException(422, f"请填写第 {index} 行的产品名称或型号")
+        quantity = _money(raw.get("quantity", 1), f"第 {index} 行数量", 3)
+        unit_price = _money(raw.get("unit_price", 0), f"第 {index} 行单价", places)
+        discount = _money(raw.get("discount_percent", 0), f"第 {index} 行折扣", 2)
+        if quantity <= 0 or unit_price < 0 or not 0 <= discount <= 100:
+            raise HTTPException(422, f"第 {index} 行数量、单价或折扣超出范围")
+        amount = (quantity * unit_price * (Decimal("1") - discount / Decimal("100"))).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+        subtotal += amount
+        normalized_items.append({
+            "name": name,
+            "description": str(raw.get("description", "")).strip()[:1500],
+            "quantity": str(quantity),
+            "unit": str(raw.get("unit", "pcs")).strip()[:30] or "pcs",
+            "unit_price": str(unit_price),
+            "discount_percent": str(discount),
+            "amount": str(amount),
+            "source": str(raw.get("source", "人工确认")).strip()[:500],
+        })
+    shipping = _money(payload.get("shipping", 0), "运费", places)
+    other_fees = _money(payload.get("other_fees", 0), "其他费用", places)
+    if shipping < 0 or other_fees < 0:
+        raise HTTPException(422, "运费和其他费用不能为负数")
+    quote_date = str(payload.get("quote_date", "")).strip() or date.today().isoformat()
+    try:
+        date.fromisoformat(quote_date)
+    except ValueError:
+        raise HTTPException(422, "报价日期格式应为 YYYY-MM-DD")
+    data = {
+        "customer": str(payload.get("customer", "")).strip()[:200],
+        "customer_address": str(payload.get("customer_address", "")).strip()[:500],
+        "quote_date": quote_date,
+        "valid_until": str(payload.get("valid_until", "")).strip()[:30],
+        "currency": currency,
+        "incoterm": str(payload.get("incoterm", "")).strip()[:100],
+        "payment_terms": str(payload.get("payment_terms", "")).strip()[:500],
+        "notes": str(payload.get("notes", "")).strip()[:2000],
+        "company_name": str(payload.get("company_name", "")).strip()[:200],
+        "company_contact": str(payload.get("company_contact", "")).strip()[:500],
+        "shipping": str(shipping),
+        "other_fees": str(other_fees),
+        "subtotal": str(subtotal.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)),
+        "total": str((subtotal + shipping + other_fees).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)),
+        "items": normalized_items,
+    }
+    return data
+
+
+def list_quotes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute("SELECT id, quote_no, customer, currency, status, data, updated_at FROM quotes ORDER BY updated_at DESC LIMIT 200").fetchall()
+    result = []
+    for row in rows:
+        data = json.loads(row["data"])
+        result.append({"id": row["id"], "quote_no": row["quote_no"], "customer": row["customer"], "currency": row["currency"], "status": row["status"], "total": data["total"], "updated_at": row["updated_at"]})
+    return result
+
+
+def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path) -> None:
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except ImportError as exc:
+        raise HTTPException(503, "PDF 组件尚未安装，请安装 requirements.txt 后重启应用") from exc
+
+    font_candidates = [
+        os.getenv("QUOTE_FONT_PATH", ""),
+        r"C:\Windows\Fonts\msyh.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    ]
+    font_path = next((Path(item) for item in font_candidates if item and Path(item).is_file()), None)
+    if not font_path:
+        raise HTTPException(503, "找不到中文 PDF 字体，请配置 QUOTE_FONT_PATH 或安装 Noto CJK 字体")
+    try:
+        if "QuoteCJK" not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont("QuoteCJK", str(font_path), subfontIndex=0))
+    except Exception as exc:
+        raise HTTPException(503, f"无法载入中文字体：{font_path.name}") from exc
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    doc = SimpleDocTemplate(str(output_path), pagesize=A4, rightMargin=16*mm, leftMargin=16*mm, topMargin=15*mm, bottomMargin=16*mm, title=quote_no)
+    styles = getSampleStyleSheet()
+    title = ParagraphStyle("QuoteTitle", parent=styles["Title"], fontName="QuoteCJK", fontSize=18, leading=24, alignment=TA_CENTER, textColor=colors.HexColor("#244d3b"), spaceAfter=9)
+    body = ParagraphStyle("QuoteBody", parent=styles["BodyText"], fontName="QuoteCJK", fontSize=8.5, leading=12, wordWrap="CJK")
+    small = ParagraphStyle("QuoteSmall", parent=body, fontSize=7, leading=9, textColor=colors.HexColor("#59645d"))
+    right = ParagraphStyle("QuoteRight", parent=body, alignment=TA_RIGHT)
+    story = []
+    safe = lambda value: escape(str(value or "")).replace("\n", "<br/>")
+    if data.get("company_name"):
+        story.extend([Paragraph(safe(data["company_name"]), ParagraphStyle("Company", parent=body, fontSize=12, leading=16)), Paragraph(safe(data.get("company_contact", "")), small), Spacer(1, 5*mm)])
+    story.append(Paragraph("产品报价单 / QUOTATION", title))
+    meta = [
+        [Paragraph(f"报价单号：{safe(quote_no)}", body), Paragraph(f"日期：{safe(data['quote_date'])}", right)],
+        [Paragraph(f"客户：{safe(data.get('customer') or '—')}", body), Paragraph(f"有效期至：{safe(data.get('valid_until') or '—')}", right)],
+        [Paragraph(f"客户地址：{safe(data.get('customer_address') or '—')}", body), Paragraph(f"币种：{safe(data['currency'])}", right)],
+    ]
+    story.append(Table(meta, colWidths=[105*mm, 73*mm], style=TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("BOTTOMPADDING",(0,0),(-1,-1),5),("LINEBELOW",(0,-1),(-1,-1),0.6,colors.HexColor("#dce4dd"))])))
+    story.append(Spacer(1, 6*mm))
+    rows = [[Paragraph("产品 / 型号", body), Paragraph("描述", body), Paragraph("数量", body), Paragraph("单价", body), Paragraph("折扣", body), Paragraph("金额", body)]]
+    for item in data["items"]:
+        details = item.get("description") or "—"
+        if item.get("source"):
+            details += f"\n价格/资料来源：{item['source']}"
+        rows.append([
+            Paragraph(safe(item["name"]), body), Paragraph(safe(details), small),
+            Paragraph(f"{safe(item['quantity'])} {safe(item['unit'])}", body), Paragraph(safe(item["unit_price"]), body),
+            Paragraph(f"{safe(item['discount_percent'])}%", body), Paragraph(safe(item["amount"]), body),
+        ])
+    table = Table(rows, colWidths=[39*mm, 51*mm, 22*mm, 22*mm, 18*mm, 26*mm], repeatRows=1, hAlign="LEFT")
+    table.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#eaf1eb")),("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#244d3b")),
+        ("FONTNAME",(0,0),(-1,-1),"QuoteCJK"),("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#dce4dd")),("LEFTPADDING",(0,0),(-1,-1),5),
+        ("RIGHTPADDING",(0,0),(-1,-1),5),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),
+    ]))
+    story.extend([table, Spacer(1, 5*mm)])
+    summary = [
+        [Paragraph("商品小计", body), Paragraph(f"{safe(data['currency'])} {safe(data['subtotal'])}", right)],
+        [Paragraph("运费", body), Paragraph(f"{safe(data['currency'])} {safe(data['shipping'])}", right)],
+        [Paragraph("其他费用", body), Paragraph(f"{safe(data['currency'])} {safe(data['other_fees'])}", right)],
+        [Paragraph("总计", ParagraphStyle("TotalLabel", parent=body, fontSize=11)), Paragraph(f"{safe(data['currency'])} {safe(data['total'])}", ParagraphStyle("Total", parent=right, fontSize=12, textColor=colors.HexColor("#17765d")))],
+    ]
+    story.append(Table(summary, colWidths=[140*mm, 38*mm], hAlign="RIGHT", style=TableStyle([("ALIGN",(1,0),(1,-1),"RIGHT"),("LINEABOVE",(0,3),(-1,3),0.8,colors.HexColor("#9db7a4")),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)])))
+    terms = [("贸易条款", data.get("incoterm")), ("付款条款", data.get("payment_terms")), ("备注", data.get("notes"))]
+    for label, value in terms:
+        if value:
+            story.extend([Spacer(1, 4*mm), Paragraph(f"<b>{label}</b>：{safe(value)}", body)])
+    story.extend([Spacer(1, 7*mm), Paragraph("本报价内容以双方最终确认为准。", small)])
+
+    def footer(canvas, _doc):
+        canvas.saveState()
+        canvas.setFont("QuoteCJK", 7)
+        canvas.setFillColor(colors.HexColor("#89958d"))
+        canvas.drawString(16*mm, 9*mm, quote_no)
+        canvas.drawRightString(A4[0]-16*mm, 9*mm, f"{_doc.page}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+
+
+def pdf_response(db_path: Path, quote_id: str, quotes_dir: Path) -> FileResponse:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT quote_no, data FROM quotes WHERE id=?", (quote_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "找不到这张报价单")
+    try:
+        safe_id = str(uuid.UUID(quote_id))
+    except (ValueError, AttributeError):
+        raise HTTPException(400, "无效的报价单编号")
+    output_path = (quotes_dir / f"{safe_id}.pdf").resolve()
+    if not output_path.is_relative_to(quotes_dir.resolve()):
+        raise HTTPException(400, "无效的报价单编号")
+    data = json.loads(row["data"])
+    render_pdf(data, row["quote_no"], output_path)
+    filename = f"{row['quote_no']}.pdf"
+    return FileResponse(output_path, media_type="application/pdf", filename=filename)

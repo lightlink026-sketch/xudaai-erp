@@ -7,7 +7,7 @@
 <body>
   <aside class="sidebar">
     <div class="brand"><div class="brand-mark">X</div><div><b>Xudaai</b><small>PRODUCT LIBRARY</small></div></div>
-    <nav><button class="nav active" data-tab="ask"><span>✧</span>AI 对话</button><button class="nav" data-tab="manage"><span>↻</span>资料同步</button></nav>
+    <nav><button class="nav active" data-tab="ask"><span>✧</span>AI 对话</button><button class="nav" data-tab="quotes"><span>＄</span>报价 PDF</button><button class="nav" data-tab="manage"><span>↻</span>资料同步</button></nav>
     <div class="side-foot"><i class="dot"></i><span>本机资料库</span><small id="side-count">载入中</small></div>
   </aside>
   <main>
@@ -44,6 +44,35 @@
         </form>
         <p class="model-dialog-note">模型服务商会收到你发送的问题、图片和命中的资料片段。API Key 仅保存在本机应用数据目录。</p>
       </dialog>
+    </section>
+    <section class="tab-panel" id="quotes">
+      <div class="intro"><span class="eyebrow">QUOTATION WORKSPACE</span><h2>产品报价单</h2><p>录入并核对产品价格，保存草稿或生成可下载的中文 PDF。价格由你确认，金额由系统计算。</p></div>
+      <div class="quote-card">
+        <div class="quote-form-head"><h3 id="quote-form-title">新建报价</h3><span id="quote-number"></span></div>
+        <form id="quote-form">
+          <div class="quote-fields">
+            <label>公司名称<input name="company_name" placeholder="填写公司抬头"></label>
+            <label>公司联系方式<input name="company_contact" placeholder="地址、电话、邮箱"></label>
+            <label>客户名称<input name="customer" placeholder="买方名称"></label>
+            <label>客户地址<input name="customer_address" placeholder="客户地址"></label>
+            <label>报价日期<input name="quote_date" type="date" required></label>
+            <label>有效期至<input name="valid_until" type="date"></label>
+            <label>币种<select name="currency"><option>USD</option><option>EUR</option><option>CNY</option><option>GBP</option><option>JPY</option></select></label>
+            <label>贸易条款<input name="incoterm" placeholder="例如 EXW / FOB Shenzhen"></label>
+            <label class="quote-wide">付款条款<input name="payment_terms" placeholder="例如 30% 订金，余款发货前支付"></label>
+          </div>
+          <div class="quote-items-head"><h3>产品明细</h3><button id="quote-add-item" class="secondary" type="button">＋ 添加产品</button></div>
+          <div id="quote-items"></div>
+          <div class="quote-fields quote-costs">
+            <label>运费<input name="shipping" type="number" min="0" step="0.01" value="0"></label>
+            <label>其他费用<input name="other_fees" type="number" min="0" step="0.01" value="0"></label>
+            <label class="quote-wide">备注<textarea name="notes" rows="2" placeholder="交期、包装、报价说明等"></textarea></label>
+          </div>
+          <div id="quote-total" class="quote-total">总计：USD 0.00</div>
+          <div class="quote-actions"><span id="quote-state">产品价格请在生成前核对。</span><button type="button" class="secondary" id="quote-save">保存草稿</button><button type="button" class="primary" id="quote-pdf">生成并下载 PDF</button><button type="button" class="secondary" id="quote-new">新建</button></div>
+        </form>
+      </div>
+      <div class="quote-list-card"><h3>报价记录</h3><div id="quote-list"><p>载入中…</p></div></div>
     </section>
     <section class="tab-panel" id="manage">
       <div class="intro"><span class="eyebrow">LIBRARY MAINTENANCE</span><h2>资料同步</h2><p>将文件放入配置的资料目录，点击同步以增量更新索引。</p></div>

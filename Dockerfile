@@ -3,6 +3,7 @@ ARG ENABLE_CLIP=0
 ARG ENABLE_MEDIA_AI=0
 WORKDIR /srv/app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-noto-cjk && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY requirements-clip.txt .

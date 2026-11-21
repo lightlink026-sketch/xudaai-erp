@@ -16,8 +16,9 @@ document.querySelectorAll('.nav').forEach((button) => {
     document.querySelectorAll('.nav,.tab-panel').forEach((item) => item.classList.remove('active'));
     button.classList.add('active');
     $('#' + button.dataset.tab).classList.add('active');
-    $('#page-title').textContent = { ask: 'AI 对话', manage: '资料同步' }[button.dataset.tab];
+    $('#page-title').textContent = { ask: 'AI 对话', quotes: '报价 PDF', manage: '资料同步' }[button.dataset.tab];
     if (button.dataset.tab === 'manage') loadStatus();
+    if (button.dataset.tab === 'quotes') loadQuotes();
   };
 });
 
@@ -346,6 +347,136 @@ $('#material-upload').onchange = async (event) => {
   }
 };
 
+let activeQuoteId = null;
+let activeQuoteStatus = 'draft';
+
+function addQuoteItem(item = {}) {
+  const row = document.createElement('div');
+  row.className = 'quote-item-row';
+  row.innerHTML = `<div class="quote-item-fields"><label>产品名称/型号<input data-field="name" required value="${esc(item.name || '')}" placeholder="产品型号"></label><label>描述<input data-field="description" value="${esc(item.description || '')}" placeholder="产品描述"></label><label>数量<input data-field="quantity" type="number" min="0.001" step="0.001" value="${esc(item.quantity || '1')}"></label><label>单位<input data-field="unit" value="${esc(item.unit || 'pcs')}"></label><label>单价<input data-field="unit_price" type="number" min="0" step="0.01" value="${esc(item.unit_price || '0')}"></label><label>折扣 %<input data-field="discount_percent" type="number" min="0" max="100" step="0.01" value="${esc(item.discount_percent || '0')}"></label><label>价格/资料来源<input data-field="source" value="${esc(item.source || '人工确认')}" placeholder="文件名、工作表或人工确认"></label></div><button type="button" class="quote-remove" aria-label="删除产品行">删除</button>`;
+  row.querySelectorAll('input').forEach((input) => input.addEventListener('input', updateQuoteTotal));
+  row.querySelector('.quote-remove').onclick = () => { row.remove(); updateQuoteTotal(); };
+  $('#quote-items').append(row);
+  updateQuoteTotal();
+}
+
+function quotePayload() {
+  const form = $('#quote-form');
+  const value = (name) => form.elements.namedItem(name).value.trim();
+  return {
+    company_name: value('company_name'), company_contact: value('company_contact'),
+    customer: value('customer'), customer_address: value('customer_address'),
+    quote_date: value('quote_date'), valid_until: value('valid_until'), currency: value('currency'),
+    incoterm: value('incoterm'), payment_terms: value('payment_terms'), notes: value('notes'),
+    shipping: value('shipping') || '0', other_fees: value('other_fees') || '0',
+    items: [...document.querySelectorAll('.quote-item-row')].map((row) => {
+      const item = {};
+      row.querySelectorAll('[data-field]').forEach((input) => { item[input.dataset.field] = input.value.trim(); });
+      return item;
+    }),
+  };
+}
+
+function updateQuoteTotal() {
+  const payload = quotePayload();
+  const places = payload.currency === 'JPY' ? 0 : 2;
+  const subtotal = payload.items.reduce((sum, item) => {
+    const qty = Number(item.quantity) || 0;
+    const price = Number(item.unit_price) || 0;
+    const discount = Math.min(100, Math.max(0, Number(item.discount_percent) || 0));
+    return sum + qty * price * (1 - discount / 100);
+  }, 0);
+  const total = subtotal + (Number(payload.shipping) || 0) + (Number(payload.other_fees) || 0);
+  $('#quote-total').textContent = `总计：${payload.currency} ${total.toFixed(places)}`;
+}
+
+function fillQuoteForm(data, id = null, quoteNo = '') {
+  const form = $('#quote-form');
+  for (const name of ['company_name','company_contact','customer','customer_address','quote_date','valid_until','currency','incoterm','payment_terms','notes','shipping','other_fees']) {
+    form.elements.namedItem(name).value = data[name] ?? (name === 'quote_date' ? new Date().toISOString().slice(0,10) : ['shipping','other_fees'].includes(name) ? '0' : name === 'currency' ? 'USD' : '');
+  }
+  $('#quote-items').innerHTML = '';
+  (data.items?.length ? data.items : [{}]).forEach(addQuoteItem);
+  activeQuoteId = id;
+  activeQuoteStatus = 'draft';
+  $('#quote-number').textContent = quoteNo;
+  $('#quote-form-title').textContent = id ? '编辑报价草稿' : '新建报价';
+  $('#quote-state').textContent = '产品价格请在生成前核对。';
+  $('#quote-save').disabled = false;
+  $('#quote-pdf').disabled = false;
+  updateQuoteTotal();
+}
+
+async function saveQuote() {
+  const payload = quotePayload();
+  const response = await fetch(activeQuoteId ? `/api/quotes/${activeQuoteId}` : '/api/quotes', {
+    method: activeQuoteId ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || '保存报价失败');
+  activeQuoteId = data.id;
+  $('#quote-number').textContent = data.quote_no;
+  $('#quote-form-title').textContent = '编辑报价草稿';
+  await loadQuotes();
+  return data;
+}
+
+async function loadQuotes() {
+  const holder = $('#quote-list');
+  if (!holder) return;
+  try {
+    const response = await fetch('/api/quotes');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '无法读取报价记录');
+    holder.innerHTML = data.quotes.length ? `<div class="quote-list">${data.quotes.map((quote) => `<div class="quote-list-row"><span><b>${esc(quote.quote_no)}</b><small>${esc(quote.customer || '未填写客户')} · ${esc(quote.currency)} ${esc(quote.total)} · ${quote.status === 'issued' ? '已生成' : '草稿'}</small></span><button type="button" class="secondary" data-quote-edit="${esc(quote.id)}">${quote.status === 'draft' ? '编辑' : '查看'}</button><button type="button" class="secondary" data-quote-download="${esc(quote.id)}">PDF</button></div>`).join('')}</div>` : '<p>还没有报价记录。</p>';
+  } catch (error) { holder.textContent = error.message || '载入报价记录失败'; }
+}
+
+$('#quote-add-item').onclick = () => addQuoteItem();
+$('#quote-form').addEventListener('input', updateQuoteTotal);
+$('#quote-save').onclick = async () => {
+  try { const data = await saveQuote(); $('#quote-state').textContent = `草稿已保存：${data.quote_no}`; toast('报价草稿已保存'); }
+  catch (error) { $('#quote-state').textContent = error.message; }
+};
+$('#quote-pdf').onclick = async () => {
+  const button = $('#quote-pdf'); button.disabled = true;
+  try {
+    const data = await saveQuote();
+    const response = await fetch(`/api/quotes/${data.id}/pdf`, { method: 'POST' });
+    if (!response.ok) { const error = await response.json(); throw new Error(error.detail || 'PDF 生成失败'); }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a'); link.href = url; link.download = `${data.quote_no}.pdf`; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    activeQuoteStatus = 'issued';
+    $('#quote-save').disabled = true;
+    $('#quote-state').textContent = `已生成并下载 ${data.quote_no}.pdf。正式报价已锁定；如需修改请新建报价。`;
+    await loadQuotes();
+  } catch (error) { $('#quote-state').textContent = error.message || 'PDF 生成失败'; }
+  finally { button.disabled = false; }
+};
+$('#quote-new').onclick = () => fillQuoteForm({});
+$('#quote-list').onclick = async (event) => {
+  const edit = event.target.closest('[data-quote-edit]');
+  const download = event.target.closest('[data-quote-download]');
+  if (edit) {
+    try {
+      const response = await fetch(`/api/quotes/${edit.dataset.quoteEdit}`); const data = await response.json();
+      if (!response.ok) throw new Error(data.detail);
+      fillQuoteForm(data.data, data.id, data.quote_no);
+      activeQuoteStatus = data.status;
+      if (data.status === 'issued') { $('#quote-save').disabled = true; $('#quote-pdf').disabled = true; $('#quote-state').textContent = '已生成报价为只读记录。'; }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (error) { toast(error.message || '无法打开报价'); }
+  }
+  if (download) {
+    const response = await fetch(`/api/quotes/${download.dataset.quoteDownload}/pdf`);
+    if (!response.ok) { const error = await response.json(); toast(error.detail || 'PDF 下载失败'); return; }
+    const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a');
+    link.href = url; link.download = 'quotation.pdf'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+};
+
 async function loadStatus() {
   try {
     const response = await fetch('/api/status');
@@ -365,3 +496,4 @@ function esc(value = '') {
 
 loadStatus();
 loadChatModels();
+fillQuoteForm({});

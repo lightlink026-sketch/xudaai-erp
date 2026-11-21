@@ -10,7 +10,7 @@ import os
 import re
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,7 @@ from PIL import Image
 from pptx import Presentation
 from pypdf import PdfReader
 import httpx
+from .quotes import list_quotes, normalize_quote, pdf_response
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
@@ -87,6 +88,11 @@ def init_db() -> None:
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(content, file_id UNINDEXED, page UNINDEXED, tokenize='unicode61');
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS quotes(
+          id TEXT PRIMARY KEY, quote_no TEXT UNIQUE NOT NULL, customer TEXT NOT NULL,
+          currency TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
         """)
         file_columns = {row[1] for row in c.execute("PRAGMA table_info(files)")}
         if "image_embedding" not in file_columns:
@@ -372,6 +378,60 @@ def status() -> dict[str, Any]:
         profiles = [cfg]
     usable_profiles = [item for item in profiles if item.get("api_key") or item.get("provider") == "ollama"]
     return {"library_dir": str(LIBRARY_DIR), "total_files": total, "errors": errs, "last_indexed": latest, "sync_interval_seconds": SYNC_INTERVAL, "dingtalk_enabled": os.getenv("DINGTALK_ENABLED", "false").lower() == "true", "answer_enabled": bool(usable_profiles), "configured_model_count": len(usable_profiles), "model_count": len(profiles), "model_provider": cfg["provider"], "model_name": cfg["model"]}
+
+
+@app.get("/api/quotes")
+def quotes_list() -> dict[str, Any]:
+    with db() as c:
+        return {"quotes": list_quotes(c)}
+
+
+@app.post("/api/quotes")
+async def quote_create(payload: dict[str, Any]) -> dict[str, Any]:
+    data = normalize_quote(payload)
+    now = datetime.now(timezone.utc).isoformat()
+    quote_id = str(uuid.uuid4())
+    quote_no = f"Q{date.today().strftime('%Y%m%d')}-{quote_id[:8].upper()}"
+    with db() as c:
+        c.execute("INSERT INTO quotes(id,quote_no,customer,currency,status,data,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (quote_id, quote_no, data["customer"], data["currency"], "draft", json.dumps(data, ensure_ascii=False), now, now))
+    return {"id": quote_id, "quote_no": quote_no, "status": "draft", "data": data}
+
+
+@app.get("/api/quotes/{quote_id}")
+def quote_get(quote_id: str) -> dict[str, Any]:
+    with db() as c:
+        row = c.execute("SELECT id,quote_no,status,data FROM quotes WHERE id=?", (quote_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "找不到这张报价单")
+    return {"id": row["id"], "quote_no": row["quote_no"], "status": row["status"], "data": json.loads(row["data"])}
+
+
+@app.put("/api/quotes/{quote_id}")
+async def quote_update(quote_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    data = normalize_quote(payload)
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as c:
+        row = c.execute("SELECT status FROM quotes WHERE id=?", (quote_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "找不到这张报价单")
+        if row["status"] != "draft":
+            raise HTTPException(409, "已生成的报价单不可直接修改，请复制为新报价")
+        c.execute("UPDATE quotes SET customer=?,currency=?,data=?,updated_at=? WHERE id=?", (data["customer"], data["currency"], json.dumps(data, ensure_ascii=False), now, quote_id))
+        row = c.execute("SELECT quote_no FROM quotes WHERE id=?", (quote_id,)).fetchone()
+    return {"id": quote_id, "quote_no": row["quote_no"], "status": "draft", "data": data}
+
+
+@app.post("/api/quotes/{quote_id}/pdf")
+def quote_generate_pdf(quote_id: str):
+    response = pdf_response(DB_PATH, quote_id, DATA_DIR / "quotes")
+    with db() as c:
+        c.execute("UPDATE quotes SET status='issued',updated_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), quote_id))
+    return response
+
+
+@app.get("/api/quotes/{quote_id}/pdf")
+def quote_download_pdf(quote_id: str):
+    return pdf_response(DB_PATH, quote_id, DATA_DIR / "quotes")
 
 
 @app.get("/api/config/models")
