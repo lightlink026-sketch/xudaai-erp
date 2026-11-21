@@ -683,7 +683,8 @@ $('#sync-btn').onclick = async () => {
   try {
     const response = await fetch('/api/index/sync', { method: 'POST' });
     const data = await response.json();
-    $('#sync-log').innerHTML = `<b>同步完成</b><pre>扫描文件：${data.scanned}\n新增/更新：${data.indexed}\n未变化：${data.unchanged}\n已移除：${data.removed}\n失败：${data.errors.length}${data.errors.map((item) => `\n- ${item.path}: ${item.error}`).join('')}</pre>`;
+    const freightLines = (data.freight_imports || []).map((item) => `\n- ${item.source_file}: ${item.error || `识别并导入 ${item.imported} 条费率`}`).join('');
+    $('#sync-log').innerHTML = `<b>同步完成</b><pre>扫描文件：${data.scanned}\n新增/更新：${data.indexed}\n未变化：${data.unchanged}\n已移除：${data.removed}\n货运报价识别：${data.freight_imports?.length || 0}${freightLines}\n失败：${data.errors.length}${data.errors.map((item) => `\n- ${item.path}: ${item.error}`).join('')}</pre>`;
     toast('资料索引已更新');
     await loadStatus();
   } catch (_) {

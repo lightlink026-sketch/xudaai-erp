@@ -94,7 +94,10 @@ def list_records(kind: str, query: str = "", limit: int = 500) -> list[dict[str,
     query = query.strip()[:200]
     with engine.begin() as c:
         rows = c.execute(text("SELECT * FROM business_records WHERE kind=:kind AND status!='deleted' AND (:q='' OR name LIKE :like OR payload LIKE :like) ORDER BY updated_at DESC LIMIT :limit"), {
-            "kind": kind, "q": query, "like": f"%{query}%", "limit": max(1, min(limit, 500)),
+            # Freight workbooks can contain hundreds of rates across multiple
+            # carriers/sheets. Keep list/import reconciliation above that size
+            # so later rows remain selectable and repeated imports stay stable.
+            "kind": kind, "q": query, "like": f"%{query}%", "limit": max(1, min(limit, 5000)),
         }).fetchall()
     return [_decode(row) for row in rows]
 
@@ -254,18 +257,48 @@ def compute_freight(data: dict[str, Any], rate: dict[str, Any] | None = None) ->
     cbm = max(0.0, float(data.get("volume_cbm", 0) or 0))
     gross = max(0.0, float(data.get("gross_weight_kg", 0) or 0))
     unit = str(rate.get("rate_unit", data.get("rate_unit", "cbm"))).lower()
-    volume_factor = max(0.0, float(rate.get("volume_weight_kg_per_cbm", 167) or 167))
-    volumetric_weight = cbm * volume_factor
+    volume_factor = max(0.0, float(rate.get("volume_weight_kg_per_cbm") or (0 if rate.get("calculation_type") == "parcel_weight_tier" else 167)))
+    divisor = float(rate.get("volumetric_divisor_cm3") or 0)
+    volumetric_weight = cbm * 1_000_000 / divisor if divisor > 0 else cbm * volume_factor
     chargeable_weight = max(gross, volumetric_weight)
-    basis = {"kg": chargeable_weight, "cbm": cbm, "carton": cartons, "shipment": 1.0}.get(unit)
+    basis = {"kg": chargeable_weight, "cbm": cbm, "carton": cartons, "shipment": 1.0,
+             "parcel_weight": chargeable_weight / max(cartons, 1)}.get(unit)
     if basis is None:
-        raise ValueError("计价单位只支持 kg、cbm、carton 或 shipment")
+        raise ValueError("该费率的计价方式还未确认，需先在货代规则中确认表格计算口径")
     rate_value = max(0.0, float(rate.get("rate", data.get("rate", 0)) or 0))
     min_charge = max(0.0, float(rate.get("minimum_charge", 0) or 0))
     fixed = max(0.0, float(rate.get("fixed_fee", 0) or 0))
     per_carton = max(0.0, float(rate.get("per_carton_fee", 0) or 0))
     calculation_type = str(rate.get("calculation_type", "unit_rate"))
-    if calculation_type == "first_renewal":
+    if calculation_type == "parcel_weight_tier":
+        min_weight = float(rate.get("weight_min_kg") or 0)
+        max_weight = float(rate.get("weight_max_kg") or 0)
+        if basis < min_weight or (max_weight and basis > max_weight):
+            raise ValueError(f"每件计费重 {basis:.3f} kg 不在此费率的 {min_weight:g}-{max_weight:g} kg 区间")
+        if cartons <= 0:
+            raise ValueError("此渠道按每件/每票计费，请提供包裹数量")
+        base = (basis * rate_value + float(rate.get("per_carton_fee", 0) or 0)) * cartons
+    elif calculation_type == "tiered_kg":
+        tiers = rate.get("tiers", [])
+        if not tiers:
+            raise ValueError("重量分段费率没有可用区间")
+        billable = __import__("math").ceil(chargeable_weight)
+        if billable <= 5:
+            base = float(tiers[0]["first_5kg"])
+        elif billable < 11:
+            base = float(tiers[0]["first_5kg"]) + (billable - 5) * float(tiers[0]["renewal_per_kg"])
+        else:
+            applicable = [tier for tier in tiers if billable >= float(tier.get("min_kg", 0)) and tier.get("rate_per_kg") is not None]
+            if not applicable:
+                raise ValueError("计费重量超出已导入费率范围")
+            base = billable * float(max(applicable, key=lambda item: float(item["min_kg"]))["rate_per_kg"])
+    elif calculation_type == "weight_band_kg":
+        tiers = [tier for tier in rate.get("tiers", []) if float(tier.get("min_kg", 0)) <= chargeable_weight]
+        if not tiers:
+            raise ValueError("货物重量低于此渠道可计价的最低重量")
+        selected = max(tiers, key=lambda item: float(item.get("min_kg", 0)))
+        base = chargeable_weight * float(selected["rate_per_kg"])
+    elif calculation_type == "first_renewal":
         first_weight = float(rate.get("first_weight") or 0)
         first_price = float(rate.get("first_price") or 0)
         additional_weight = float(rate.get("additional_weight") or 0)
@@ -327,6 +360,7 @@ def calculate_commission(seller_id: str, start_date: str, end_date: str) -> dict
 
 def import_freight_rows(filename: str, content: bytes, actor: str = "") -> list[dict[str, Any]]:
     suffix = Path(filename).suffix.lower()
+    workbook_rows: list[tuple[str, list[tuple[Any, ...]]]] = []
     if suffix == ".csv":
         sheets = [(Path(filename).stem, list(csv.DictReader(io.StringIO(content.decode("utf-8-sig", errors="replace")))))]
     elif suffix in {".xlsx", ".xlsm"}:
@@ -334,22 +368,160 @@ def import_freight_rows(filename: str, content: bytes, actor: str = "") -> list[
         workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
         sheets = []
         for sheet in workbook.worksheets:
-            iterator = sheet.iter_rows(values_only=True)
-            headers = [str(v or "").strip() for v in next(iterator, ())]
-            rows = [dict(zip(headers, values)) for values in iterator if any(v is not None for v in values)]
+            raw_rows = list(sheet.iter_rows(values_only=True))
+            workbook_rows.append((sheet.title, raw_rows))
+            headers = [str(v or "").strip() for v in (raw_rows[0] if raw_rows else ())]
+            rows = [dict(zip(headers, values)) for values in raw_rows[1:] if any(v is not None for v in values)]
             if rows:
                 sheets.append((sheet.title, rows))
     else:
         raise ValueError("运费表请上传 CSV 或 XLSX 文件")
     aliases = {"起运地": "origin", "起运港": "origin", "origin": "origin", "出发地": "origin", "目的地": "destination", "目的港": "destination", "destination": "destination", "运输方式": "method", "运输": "method", "method": "method", "渠道": "channel", "产品名称": "channel", "服务名称": "channel", "service": "channel", "货代": "carrier", "货代公司": "carrier", "物流公司": "carrier", "承运商": "carrier", "carrier": "carrier", "计价单位": "rate_unit", "单位": "rate_unit", "rate unit": "rate_unit", "计价方式": "rate_unit", "计费方式": "rate_unit", "单价": "rate", "运价": "rate", "价格": "rate", "rate": "rate", "币种": "currency", "currency": "currency", "最低收费": "minimum_charge", "最低运费": "minimum_charge", "最低消费": "minimum_charge", "minimum charge": "minimum_charge", "固定费用": "fixed_fee", "操作费": "fixed_fee", "fixed fee": "fixed_fee", "每箱费用": "per_carton_fee", "每箱": "per_carton_fee", "per carton fee": "per_carton_fee", "体积重系数": "volume_weight_kg_per_cbm", "体积系数": "volume_weight_kg_per_cbm", "kg/cbm": "volume_weight_kg_per_cbm", "抛比": "volume_weight_kg_per_cbm", "首重": "first_weight", "首重价格": "first_price", "续重": "additional_weight", "续重价格": "additional_price", "生效日期": "effective_from", "有效期": "effective_from"}
     unit_map = {"kg": "kg", "公斤": "kg", "千克": "kg", "cbm": "cbm", "立方": "cbm", "立方米": "cbm", "m3": "cbm", "m³": "cbm", "carton": "carton", "箱": "carton", "箱/件": "carton", "shipment": "shipment", "票": "shipment", "每票": "shipment"}
+    # Freight quotes often use merged, multi-row headers rather than a flat
+    # database table. Recognize the two common source layouts explicitly.
+    special_rows: list[tuple[str, int, dict[str, Any]]] = []
+    def cell(row: tuple[Any, ...], col: int) -> str:
+        return str(row[col] or "").strip() if col < len(row) else ""
+    def number(value: Any) -> float | None:
+        try:
+            return float(str(value).replace(",", "").strip()) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+    def weight_range(value: Any) -> tuple[float, float] | None:
+        match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*[-–~至]\s*(\d+(?:\.\d+)?)\s*", str(value or ""))
+        return (float(match.group(1)), float(match.group(2))) if match else None
+    for sheet_name, raw_rows in workbook_rows:
+        # Country + weight band + RMB/kg + RMB/ticket layout (for example,
+        # 全球普货专线JS in 欧美普货F牌小包.xlsx).
+        for header_idx, header in enumerate(raw_rows[:12]):
+            joined = " ".join(cell(header, c).casefold() for c in range(len(header)))
+            if "国家" not in joined or "重量" not in joined or "rmb/kg" not in joined or "rmb/票" not in joined:
+                continue
+            country = ""
+            for row_idx in range(header_idx + 1, len(raw_rows)):
+                row = raw_rows[row_idx]
+                if cell(row, 0) and not any(key in cell(row, 0) for key in ("备注", "说明", "时效")):
+                    country = cell(row, 0)
+                band = weight_range(row[1] if len(row) > 1 else None)
+                rate, ticket_fee = number(row[2] if len(row) > 2 else None), number(row[3] if len(row) > 3 else None)
+                if not country or not band or rate is None:
+                    continue
+                special_rows.append((sheet_name, 1_000_000 + row_idx, {
+                    "name": f"{Path(filename).stem} / {sheet_name} / {country} / {band[0]:g}-{band[1]:g}kg",
+                    "carrier": "欧美普货F牌小包", "channel": sheet_name, "origin": "中国", "destination": country,
+                    "method": "小包按单件重量分段计价", "currency": "RMB", "rate_unit": "parcel_weight",
+                    "rate": rate, "per_carton_fee": ticket_fee or 0, "weight_min_kg": band[0], "weight_max_kg": band[1],
+                    "calculation_type": "parcel_weight_tier", "classification_status": "confirmed_from_table",
+                    "formula_summary": f"每件按重量区间 {band[0]:g}-{band[1]:g} kg：RMB {rate:g}/kg + RMB {ticket_fee or 0:g}/票",
+                    "delivery_time": cell(row, 4), "source_sheet": sheet_name,
+                }))
+        # First-5kg + renewal + 11/21/51/101kg tier format in the PEL
+        # European UPS sheet. Both volume divisor and 300kg split notice are
+        # retained as explicit rule metadata from the workbook.
+        divisor = 0
+        sheet_text = " ".join(cell(row, c) for row in raw_rows for c in range(min(len(row), 18)))
+        if re.search(r"(?:除|/)\s*8000", sheet_text):
+            divisor = 8000
+        for header_idx, header in enumerate(raw_rows):
+            header_text = " ".join(cell(header, c).casefold() for c in range(len(header)))
+            if "首重5kg" not in header_text or "续重1kg" not in header_text or "101kg+" not in header_text:
+                continue
+            channel_row = raw_rows[header_idx - 1] if header_idx else ()
+            for block, country_col in enumerate((1, 9)):
+                channel = cell(channel_row, country_col + 1) or cell(channel_row, country_col + 2) or f"欧洲 UPS 费率区块 {block + 1}"
+                for row_idx in range(header_idx + 1, len(raw_rows)):
+                    row = raw_rows[row_idx]
+                    country_group = cell(row, country_col)
+                    if not country_group:
+                        if row_idx > header_idx + 1:
+                            break
+                        continue
+                    first_price, renewal = number(row[country_col + 1] if len(row) > country_col + 1 else None), number(row[country_col + 2] if len(row) > country_col + 2 else None)
+                    tier_rates = [number(row[country_col + offset] if len(row) > country_col + offset else None) for offset in range(3, 7)]
+                    if first_price is None or renewal is None or any(value is None for value in tier_rates):
+                        continue
+                    tiers = [{"first_5kg": first_price, "renewal_per_kg": renewal}, *[{"min_kg": minimum, "rate_per_kg": rate} for minimum, rate in zip((11, 21, 51, 101), tier_rates)]]
+                    special_rows.append((sheet_name, 2_000_000 + row_idx * 10 + block, {
+                        "name": f"{Path(filename).stem} / {sheet_name} / {channel} / {country_group}",
+                        "carrier": cell(raw_rows[0], 0) or Path(filename).stem, "channel": channel, "origin": "中国", "destination": country_group,
+                        "method": "空派 UPS 重量分段", "currency": "RMB", "rate_unit": "kg", "rate": tier_rates[-1],
+                        "calculation_type": "tiered_kg", "tiers": tiers, "volumetric_divisor_cm3": divisor,
+                        "split_above_kg": 300, "classification_status": "confirmed_from_table",
+                        "formula_summary": f"首重5kg RMB {first_price:g}，续重 RMB {renewal:g}/kg；11/21/51/101kg+ 单价分别为 " + "/".join(f"{value:g}" for value in tier_rates) + f" RMB/kg；材积除数 {divisor or '未识别'}；超过300kg需分票",
+                        "source_sheet": sheet_name,
+                    }))
+        # PEL DHL sections use two horizontal blocks and split each service
+        # into single-parcel pricing and multi-piece weight bands.
+        for header_idx, header in enumerate(raw_rows):
+            header_text = " ".join(cell(header, c).casefold() for c in range(len(header)))
+            previous_text = " ".join(cell(raw_rows[header_idx - 1], c).casefold() for c in range(len(raw_rows[header_idx - 1]))) if header_idx else ""
+            if "国家/重量" not in previous_text or "运费/kg" not in header_text or not any(token in header_text for token in ("操作费/票", "操作费/件")):
+                continue
+            label_row = header
+            channel_row = raw_rows[header_idx - 2] if header_idx > 1 else ()
+            for block, country_col in enumerate((1, 10)):
+                band_columns: list[tuple[float, int]] = []
+                for col in range(country_col + 3, min(len(header), country_col + 9)):
+                    label = cell(label_row, col) or cell(header, col)
+                    match = re.match(r"\s*(\d+(?:\.\d+)?)\s*(?:-|kg|\+)", label.casefold())
+                    if match:
+                        band_columns.append((float(match.group(1)), col))
+                if not band_columns:
+                    continue
+                channel = cell(channel_row, country_col + 1) or f"欧洲 DHL 费率区块 {block + 1}"
+                for row_idx in range(header_idx + 1, len(raw_rows)):
+                    row = raw_rows[row_idx]
+                    country_group = cell(row, country_col)
+                    if not country_group:
+                        if row_idx > header_idx + 1:
+                            break
+                        continue
+                    per_kg, per_ticket = number(row[country_col + 1] if len(row) > country_col + 1 else None), number(row[country_col + 2] if len(row) > country_col + 2 else None)
+                    if per_kg is None:
+                        continue
+                    minimum_weight = min((minimum for minimum, _ in band_columns), default=0)
+                    special_rows.append((sheet_name, 3_000_000 + row_idx * 20 + block * 2, {
+                        "name": f"{Path(filename).stem} / {sheet_name} / {channel} / {country_group} / single parcel",
+                        "carrier": cell(raw_rows[0], 0) or Path(filename).stem, "channel": f"{channel} 单件", "origin": "中国", "destination": country_group,
+                        "method": "DHL 按单件重量+票费", "currency": "RMB", "rate_unit": "parcel_weight", "rate": per_kg,
+                        "per_carton_fee": per_ticket or 0, "weight_min_kg": 0.02, "weight_max_kg": 30,
+                        "calculation_type": "parcel_weight_tier", "classification_status": "confirmed_from_table",
+                        "formula_summary": f"单件 0.02-30 kg：RMB {per_kg:g}/kg + RMB {per_ticket or 0:g}/票",
+                        "volumetric_divisor_cm3": divisor, "source_sheet": sheet_name,
+                    }))
+                    tiers = [{"min_kg": minimum, "rate_per_kg": number(row[col])} for minimum, col in band_columns if number(row[col]) is not None]
+                    if tiers:
+                        special_rows.append((sheet_name, 3_000_000 + row_idx * 20 + block * 2 + 1, {
+                            "name": f"{Path(filename).stem} / {sheet_name} / {channel} / {country_group} / multi-piece",
+                            "carrier": cell(raw_rows[0], 0) or Path(filename).stem, "channel": f"{channel} 多件", "origin": "中国", "destination": country_group,
+                            "method": "DHL 多件按总重量分段", "currency": "RMB", "rate_unit": "kg", "rate": tiers[-1]["rate_per_kg"],
+                            "calculation_type": "weight_band_kg", "tiers": tiers, "volumetric_divisor_cm3": divisor,
+                            "minimum_weight_kg": minimum_weight, "classification_status": "confirmed_from_table",
+                            "formula_summary": "多件合票按总计费重量分段计价：" + "; ".join(f"{tier['min_kg']:g}kg+ RMB {tier['rate_per_kg']:g}/kg" for tier in tiers),
+                            "source_sheet": sheet_name,
+                        }))
     saved = []
     existing = {(str(record["data"].get("source_sheet", "")), int(record["data"].get("source_row", -1))): record for record in list_records("freight_rate", limit=2000) if record["data"].get("source_file") == filename}
     seen_rows: set[tuple[str, int]] = set()
     source_row = 0
+    for special_sheet, special_row, special_data in special_rows:
+        sheets.append((special_sheet, [{"__special_data": special_data, "__source_row": special_row}]))
     for sheet_name, rows in sheets:
         for row in rows:
             source_row += 1
+            special_data = row.get("__special_data") if isinstance(row, dict) else None
+            record_row = int(row.get("__source_row", source_row)) if special_data else source_row
+            if special_data:
+                data = dict(special_data)
+                data["source_sheet"] = sheet_name[:120]
+                data["source_row"] = record_row
+                data["source_file"] = filename[:240]
+                data["classification_status"] = data.get("classification_status", "confirmed_from_table")
+                data["id"] = existing[(sheet_name, record_row)]["id"] if (sheet_name, record_row) in existing else data.get("id")
+                seen_rows.add((sheet_name, record_row))
+                saved.append(save_record("freight_rate", data, actor))
+                continue
             mapped = {aliases.get(str(k or "").strip().casefold(), str(k or "").strip()): v for k, v in row.items()}
             if not mapped.get("rate") and not mapped.get("first_price"):
                 continue

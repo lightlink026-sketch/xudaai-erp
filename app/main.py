@@ -315,10 +315,26 @@ def sync_library() -> dict[str, Any]:
     seen: set[str] = set()
     results = []
     for p in LIBRARY_DIR.rglob("*"):
-        if p.is_file() and not p.is_symlink() and p.suffix.lower() in SUPPORTED:
+        if p.is_file() and not p.is_symlink() and not p.name.startswith("~$") and p.suffix.lower() in SUPPORTED:
             rel = p.relative_to(LIBRARY_DIR).as_posix()
             seen.add(rel)
             results.append(index_one(p, rel))
+    freight_imports = []
+    freight_folder = (LIBRARY_DIR / "国际货运报价").resolve()
+    if freight_folder.exists():
+        indexed_status = {item["path"]: item["status"] for item in results}
+        imported_sources = {str(record["data"].get("source_file", "")) for record in list_business_records("freight_rate", limit=2000)}
+        for path in freight_folder.rglob("*"):
+            if not path.is_file() or path.name.startswith("~$") or path.suffix.lower() not in {".xlsx", ".xlsm", ".csv"}:
+                continue
+            rel = path.relative_to(LIBRARY_DIR).as_posix()
+            if indexed_status.get(rel) == "indexed" or rel not in imported_sources:
+                try:
+                    rates = import_freight_rows(rel, path.read_bytes())
+                    freight_imports.append({"source_file": rel, "imported": len(rates)})
+                    imported_sources.add(rel)
+                except (ValueError, OSError) as exc:
+                    freight_imports.append({"source_file": rel, "error": str(exc)[:200]})
     with db() as c:
         current = {r[0] for r in c.execute("SELECT path FROM files")}
         removed = current - seen
@@ -327,7 +343,7 @@ def sync_library() -> dict[str, Any]:
             c.execute("DELETE FROM chunks_fts WHERE file_id=?", (fid,))
             c.execute("DELETE FROM chunks WHERE file_id=?", (fid,))
             c.execute("DELETE FROM files WHERE id=?", (fid,))
-    return {"scanned": len(seen), "indexed": sum(x["status"] == "indexed" for x in results), "unchanged": sum(x["status"] == "unchanged" for x in results), "errors": [x for x in results if x["status"] == "error"], "removed": len(removed)}
+    return {"scanned": len(seen), "indexed": sum(x["status"] == "indexed" for x in results), "unchanged": sum(x["status"] == "unchanged" for x in results), "errors": [x for x in results if x["status"] == "error"], "removed": len(removed), "freight_imports": freight_imports}
 
 
 def file_record(file_id: int) -> sqlite3.Row:
