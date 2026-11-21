@@ -133,7 +133,7 @@ def list_quotes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     result = []
     for row in rows:
         data = json.loads(row["data"])
-        result.append({"id": row["id"], "quote_no": row["quote_no"], "customer": row["customer"], "currency": row["currency"], "status": row["status"], "total": data["total"], "updated_at": row["updated_at"]})
+        result.append({"id": row["id"], "quote_no": row["quote_no"], "customer": row["customer"], "currency": row["currency"], "status": row["status"], "document_type": data.get("document_type", "quote"), "total": data["total"], "updated_at": row["updated_at"]})
     return result
 
 
@@ -205,13 +205,26 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
         photo_items = [item for item in data["items"] if item.get("image_path")]
         if not photo_items:
             return []
-        gallery_rows = [[Paragraph(word("产品图片", "Product Image"), body), Paragraph(word("产品 / 型号", "Product / Model"), body)]]
+        gallery_rows = [[Paragraph(word("产品图片", "Product Image"), body), Paragraph(word("产品信息", "Product Details"), body)]]
         for item in photo_items:
-            gallery_rows.append([product_photo(item, 30*mm, 25*mm), Paragraph(safe(item["name"]), body)])
+            details = [f"<b>{safe(item['name'])}</b>"]
+            for key, zh_label, en_label in (
+                ("description", "描述", "Description"),
+                ("colors", "颜色", "Color"),
+                ("size_breakdown", "尺码配比", "Size Breakdown"),
+                ("carton_spec", "箱规", "Carton dimensions"),
+                ("carton_volume", "单箱体积", "Volume per carton"),
+                ("gross_weight", "毛重", "Gross weight"),
+                ("net_weight", "净重", "Net weight"),
+            ):
+                if item.get(key):
+                    details.append(f"{word(zh_label, en_label)}: {safe(item[key])}")
+            details.append(f"{word('数量', 'Quantity')}: {safe(item['quantity'])} {safe(item['unit'])} · {word('单价', 'Unit price')}: {safe(item['unit_price'])} · {word('金额', 'Amount')}: {safe(item['amount'])} {safe(data['currency'])}")
+            gallery_rows.append([product_photo(item, 20*mm, 20*mm), Paragraph("<br/>".join(details), small)])
         gallery = Table(gallery_rows, colWidths=[36*mm, 142*mm], repeatRows=1, hAlign="LEFT")
         gallery.setStyle(TableStyle([
             ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#eaf1eb")),("FONTNAME",(0,0),(-1,-1),"QuoteCJK"),
-            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#dce4dd")),
+            ("VALIGN",(0,0),(-1,-1),"TOP"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#dce4dd")),
             ("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),
             ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
         ]))
@@ -282,7 +295,7 @@ def render_pdf(data: dict[str, Any], quote_no: str, output_path: Path, template_
         if item.get("configuration"):
             details += f"\n{word('颜色/尺码/配比', 'Configuration')}: {item['configuration']}"
         if item.get("colors"):
-            details += f"\n{word('颜色/颜色数量', 'Colors / Color Qty.')}: {item['colors']}"
+            details += f"\n{word('颜色', 'Color')}: {item['colors']}"
         if item.get("size_breakdown"):
             details += f"\n{word('尺码配比', 'Size Breakdown')}: {item['size_breakdown']}"
         for key, zh_label, en_label in (

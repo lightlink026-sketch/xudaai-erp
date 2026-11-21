@@ -482,7 +482,7 @@ function addQuoteItem(item = {}) {
   row.className = 'quote-item-row';
   const imageFileId = Number(item.image_file_id) || 0;
   const imagePreview = imageFileId > 0 ? `<img src="/api/files/${imageFileId}/preview" alt="${esc(item.name || '产品图片')}" loading="lazy">` : '<span>无图片</span>';
-  row.innerHTML = `<div class="quote-product-photo">${imagePreview}<input type="hidden" data-field="image_path" value="${esc(item.image_path || '')}"><input type="hidden" data-field="image_file_id" value="${imageFileId}"></div><div class="quote-item-fields"><label>产品名称/型号<input data-field="name" required value="${esc(item.name || '')}" placeholder="产品型号"></label><label>描述<input data-field="description" value="${esc(item.description || '')}" placeholder="产品描述"></label><label>颜色及数量<input data-field="colors" value="${esc(item.colors || '')}" placeholder="黑色 10 双；卡其 20 双"></label><label>尺码配比<input data-field="size_breakdown" value="${esc(item.size_breakdown || '')}" placeholder="36:2, 37:4, 38:6…"></label><label>其他配置<input data-field="configuration" value="${esc(item.configuration || '')}" placeholder="其他规格说明"></label><label>箱规<input data-field="carton_spec" value="${esc(item.carton_spec || '')}" placeholder="75 × 53 × 35 cm"></label><label>单箱体积<input data-field="carton_volume" value="${esc(item.carton_volume || '')}" placeholder="0.15 m³/箱"></label><label>毛重<input data-field="gross_weight" value="${esc(item.gross_weight || '')}" placeholder="kg/箱"></label><label>净重<input data-field="net_weight" value="${esc(item.net_weight || '')}" placeholder="kg/箱"></label><label>总数量<input data-field="quantity" type="number" min="0.001" step="0.001" value="${esc(item.quantity || '1')}"></label><label>MOQ<input data-field="moq" type="number" min="0" step="1" value="${esc(item.moq || '0')}"></label><label>单位<input data-field="unit" value="${esc(item.unit || 'pcs')}"></label><label>单价<input data-field="unit_price" type="number" min="0" step="0.01" value="${esc(item.unit_price || '0')}"></label><label>折扣 %<input data-field="discount_percent" type="number" min="0" max="100" step="0.01" value="${esc(item.discount_percent || '0')}"></label><label>价格/资料来源<input data-field="source" value="${esc(item.source || '人工确认')}" placeholder="文件名、工作表或人工确认"></label></div><button type="button" class="quote-remove" aria-label="删除产品行">删除</button>`;
+  row.innerHTML = `<div class="quote-product-photo">${imagePreview}<input type="hidden" data-field="image_path" value="${esc(item.image_path || '')}"><input type="hidden" data-field="image_file_id" value="${imageFileId}"></div><div class="quote-item-fields"><label>产品名称/型号<input data-field="name" required value="${esc(item.name || '')}" placeholder="产品型号"></label><label>描述<input data-field="description" value="${esc(item.description || '')}" placeholder="产品描述"></label><label>颜色<input data-field="colors" value="${esc(item.colors || '')}" placeholder="黑色 / 卡其色（不填数量）"></label><label>尺码配比<input data-field="size_breakdown" value="${esc(item.size_breakdown || '')}" placeholder="36:2, 37:4, 38:6…"></label><label>其他配置<input data-field="configuration" value="${esc(item.configuration || '')}" placeholder="其他规格说明"></label><label>箱规<input data-field="carton_spec" value="${esc(item.carton_spec || '')}" placeholder="75 × 53 × 35 cm"></label><label>单箱体积<input data-field="carton_volume" value="${esc(item.carton_volume || '')}" placeholder="0.15 m³/箱"></label><label>毛重<input data-field="gross_weight" value="${esc(item.gross_weight || '')}" placeholder="kg/箱"></label><label>净重<input data-field="net_weight" value="${esc(item.net_weight || '')}" placeholder="kg/箱"></label><label>总数量<input data-field="quantity" type="number" min="0.001" step="0.001" value="${esc(item.quantity || '1')}"></label><label>MOQ<input data-field="moq" type="number" min="0" step="1" value="${esc(item.moq || '0')}"></label><label>单位<input data-field="unit" value="${esc(item.unit || 'pcs')}"></label><label>单价<input data-field="unit_price" type="number" min="0" step="0.01" value="${esc(item.unit_price || '0')}"></label><label>折扣 %<input data-field="discount_percent" type="number" min="0" max="100" step="0.01" value="${esc(item.discount_percent || '0')}"></label><label>价格/资料来源<input data-field="source" value="${esc(item.source || '人工确认')}" placeholder="文件名、工作表或人工确认"></label></div><button type="button" class="quote-remove" aria-label="删除产品行">删除</button>`;
   row.querySelectorAll('input').forEach((input) => input.addEventListener('input', updateQuoteTotal));
   row.querySelector('.quote-remove').onclick = () => { row.remove(); updateQuoteTotal(); };
   $('#quote-items').append(row);
@@ -642,7 +642,7 @@ async function loadQuotes() {
     const response = await fetch('/api/quotes');
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || '无法读取报价记录');
-    holder.innerHTML = data.quotes.length ? `<div class="quote-list">${data.quotes.map((quote) => `<div class="quote-list-row"><span><b>${esc(quote.quote_no)}</b><small>${esc(quote.customer || '未填写客户')} · ${esc(quote.currency)} ${esc(quote.total)} · ${quote.status === 'issued' ? '已生成' : '草稿'}</small></span><button type="button" class="secondary" data-quote-edit="${esc(quote.id)}">${quote.status === 'draft' ? '编辑' : '查看'}</button><button type="button" class="secondary" data-quote-download="${esc(quote.id)}">PDF</button></div>`).join('')}</div>` : '<p>还没有报价记录。</p>';
+    holder.innerHTML = data.quotes.length ? `<div class="quote-list">${data.quotes.map((quote) => `<div class="quote-list-row"><span><b>${esc(quote.quote_no)}</b><small>${esc(quote.customer || '未填写客户')} · ${esc(quote.currency)} ${esc(quote.total)} · ${quote.document_type === 'pi' ? 'PI' : '报价单'} · ${quote.status === 'issued' ? '已生成' : '草稿'}</small></span><button type="button" class="secondary" data-quote-edit="${esc(quote.id)}">${quote.status === 'draft' ? '编辑' : '查看'}</button>${quote.document_type !== 'pi' ? `<button type="button" class="secondary" data-quote-to-pi="${esc(quote.id)}">基于此报价生成 PI</button>` : ''}<button type="button" class="secondary" data-quote-download="${esc(quote.id)}">PDF</button></div>`).join('')}</div>` : '<p>还没有报价记录。</p>';
   } catch (error) { holder.textContent = error.message || '载入报价记录失败'; }
 }
 
@@ -717,7 +717,25 @@ $('#quote-pdf').onclick = async () => {
 $('#quote-new').onclick = () => { autoImportedSelection = ''; fillQuoteForm({}); };
 $('#quote-list').onclick = async (event) => {
   const edit = event.target.closest('[data-quote-edit]');
+  const toPi = event.target.closest('[data-quote-to-pi]');
   const download = event.target.closest('[data-quote-download]');
+  if (toPi) {
+    try {
+      const response = await fetch(`/api/quotes/${toPi.dataset.quoteToPi}`); const source = await response.json();
+      if (!response.ok) throw new Error(source.detail || '无法读取报价单');
+      const pi = { ...source.data, document_type: 'pi', quote_date: new Date().toISOString().slice(0, 10), notes: [source.data.notes, source.data.language === 'en' ? `Based on quotation ${source.quote_no}.` : `依据报价单 ${source.quote_no} 生成。`].filter(Boolean).join('\n') };
+      fillQuoteForm(pi);
+      pendingDocumentType = 'pi'; autoImportedSelection = '';
+      $('#quote-form-title').textContent = '基于报价单新建 PI';
+      $('#quote-state').textContent = `已从 ${source.quote_no} 带入产品、客户、价格和贸易条款；请核对后生成 PI。`;
+      $('#quote-dialog').showModal();
+      await loadQuoteTemplates();
+      await Promise.all([loadQuoteCustomers(), loadCompanyProfiles()]);
+      showQuoteStage(1);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (error) { toast(error.message || '无法从报价单生成 PI'); }
+    return;
+  }
   if (edit) {
     try {
       const response = await fetch(`/api/quotes/${edit.dataset.quoteEdit}`); const data = await response.json();
