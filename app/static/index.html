@@ -52,11 +52,11 @@
           <div id="quote-selected-products" class="quote-selected-products"><span>还没有勾选产品。请先在对话结果中勾选产品图片或资料。</span></div>
           <div class="quote-stepper"><button type="button" data-step-go="1" class="active">1 产品</button><button type="button" data-step-go="2">2 客户</button><button type="button" data-step-go="3">3 条款</button></div>
           <form id="quote-form">
+            <div class="quote-language-toolbar"><label>报价单语言<select name="language"><option value="zh">中文</option><option value="en">English</option></select></label><span>切换为 English 会同步翻译产品资料并更新 PDF 标签</span></div>
             <section class="quote-stage" data-quote-stage="1">
             <div class="quote-step-title">第 1 步：产品与数量配置</div>
             <div class="quote-fields">
               <label>单据类型<select name="document_type"><option value="quote">产品报价单</option><option value="pi">PI 形式发票</option></select></label>
-              <label>单据语言<select name="language"><option value="zh">中文</option><option value="en">English</option></select></label>
               <label>模板<select name="template_name" id="quote-template"><option value="">系统默认模板</option></select></label>
               <label class="template-upload">上传 DOCX 模板<input id="quote-template-upload" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label>
               <label>选择公司资料<select id="quote-company-profile"><option value="">手动填写</option></select></label>
