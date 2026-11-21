@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -92,24 +93,64 @@ def init_db() -> None:
             c.execute("ALTER TABLE files ADD COLUMN image_embedding TEXT")
 
 
-def model_config() -> dict[str, str]:
+def read_model_store() -> dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        stored = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        return stored if isinstance(stored, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def model_config(profile_id: str | None = None) -> dict[str, str]:
     config = {"provider": os.getenv("MODEL_PROVIDER", "openai-compatible"), "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"), "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"), "api_key": os.getenv("OPENAI_API_KEY", "")}
-    if CONFIG_PATH.exists():
-        try:
-            saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            config.update({k: str(v) for k,v in saved.items() if k in config})
-        except (OSError, ValueError):
-            pass
+    saved = read_model_store()
+    config.update({k: str(v) for k, v in saved.items() if k in config})
+    selected_id = profile_id or str(saved.get("active_profile_id") or "")
+    if selected_id:
+        profile = next((item for item in saved.get("profiles", []) if isinstance(item, dict) and item.get("id") == selected_id), None)
+        if profile:
+            config.update({k: str(profile.get(k, "")) for k in config})
     return config
 
 
-def save_model_config(config: dict[str, str]) -> None:
+def save_model_config(config: dict[str, str], profile_id: str, profile_name: str) -> str:
+    saved = read_model_store()
+    profiles = [item for item in saved.get("profiles", []) if isinstance(item, dict)]
+    existing = next((item for item in profiles if item.get("id") == profile_id), None)
+    if profile_id in {"", "new"}:
+        if not profiles:
+            old_config = {key: str(saved.get(key, os.getenv(env_key, default))) for key, env_key, default in [
+                ("provider", "MODEL_PROVIDER", "openai-compatible"),
+                ("base_url", "OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                ("model", "OPENAI_MODEL", "gpt-4o-mini"),
+                ("api_key", "OPENAI_API_KEY", ""),
+            ]}
+            old_name = f"{old_config['provider']} · {old_config['model']}"
+            profiles.append({"id": "current", "name": old_name, **old_config})
+        profile_id = str(uuid.uuid4())
+    if not profile_name.strip():
+        raise HTTPException(400, "请填写模型配置名称")
+    profile = {"id": profile_id, "name": profile_name.strip()[:60], **config}
+    if existing:
+        profiles = [profile if item.get("id") == profile_id else item for item in profiles]
+    else:
+        profiles.append(profile)
+    saved.update(config)
+    saved["profiles"] = profiles
+    saved["active_profile_id"] = profile_id
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    CONFIG_PATH.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
         CONFIG_PATH.chmod(0o600)
     except OSError:
         pass
+    return profile_id
+
+
+def safe_model_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    return {"id": str(profile.get("id", "")), "name": str(profile.get("name", "")), "provider": str(profile.get("provider", "")), "base_url": str(profile.get("base_url", "")), "model": str(profile.get("model", "")), "has_api_key": bool(profile.get("api_key"))}
 
 
 def visual_embedding(image: Image.Image) -> list[float]:
@@ -326,36 +367,92 @@ def status() -> dict[str, Any]:
         errs = c.execute("SELECT COUNT(*) FROM files WHERE status='error'").fetchone()[0]
         latest = c.execute("SELECT MAX(indexed_at) FROM files").fetchone()[0]
     cfg = model_config()
-    return {"library_dir": str(LIBRARY_DIR), "total_files": total, "errors": errs, "last_indexed": latest, "sync_interval_seconds": SYNC_INTERVAL, "dingtalk_enabled": os.getenv("DINGTALK_ENABLED", "false").lower() == "true", "answer_enabled": bool(cfg["api_key"]) or cfg["provider"] == "ollama", "model_provider": cfg["provider"], "model_name": cfg["model"]}
+    profiles = [item for item in read_model_store().get("profiles", []) if isinstance(item, dict)]
+    if not profiles:
+        profiles = [cfg]
+    usable_profiles = [item for item in profiles if item.get("api_key") or item.get("provider") == "ollama"]
+    return {"library_dir": str(LIBRARY_DIR), "total_files": total, "errors": errs, "last_indexed": latest, "sync_interval_seconds": SYNC_INTERVAL, "dingtalk_enabled": os.getenv("DINGTALK_ENABLED", "false").lower() == "true", "answer_enabled": bool(usable_profiles), "configured_model_count": len(usable_profiles), "model_count": len(profiles), "model_provider": cfg["provider"], "model_name": cfg["model"]}
+
+
+@app.get("/api/config/models")
+def get_model_profiles():
+    saved = read_model_store()
+    profiles = [item for item in saved.get("profiles", []) if isinstance(item, dict)]
+    if not profiles:
+        current = model_config()
+        profiles = [{"id": "current", "name": f"{current['provider']} · {current['model']}", **current}]
+    active_id = str(saved.get("active_profile_id") or profiles[0]["id"])
+    return {"active_profile_id": active_id, "profiles": [safe_model_profile(item) for item in profiles]}
 
 
 @app.get("/api/config/model")
-def get_model_config():
-    cfg = model_config()
-    return {"provider": cfg["provider"], "base_url": cfg["base_url"], "model": cfg["model"], "has_api_key": bool(cfg["api_key"])}
+def get_model_config(profile_id: str | None = None):
+    cfg = model_config(profile_id)
+    saved = read_model_store()
+    selected_id = profile_id or str(saved.get("active_profile_id") or "current")
+    profile = next((item for item in saved.get("profiles", []) if isinstance(item, dict) and item.get("id") == selected_id), None)
+    return {"profile_id": selected_id, "name": str(profile.get("name", "")) if profile else f"{cfg['provider']} · {cfg['model']}", "provider": cfg["provider"], "base_url": cfg["base_url"], "model": cfg["model"], "has_api_key": bool(cfg["api_key"])}
 
 
 @app.put("/api/config/model")
 def put_model_config(payload: dict[str, Any]):
-    current = model_config()
+    profile_id = str(payload.get("profile_id") or "current")
+    current = model_config(None if profile_id == "new" else profile_id)
     provider = str(payload.get("provider", current["provider"]))
-    defaults = {"deepseek": ("https://api.deepseek.com/v1", "deepseek-chat"), "siliconflow": ("https://api.siliconflow.cn/v1", "Qwen/Qwen2.5-VL-72B-Instruct"), "openai": ("https://api.openai.com/v1", "gpt-4o-mini"), "ollama": ("http://host.docker.internal:11434/v1", "qwen2.5:7b"), "openai-compatible": (current["base_url"], current["model"])}
+    defaults = {"deepseek": ("https://api.deepseek.com/v1", "deepseek-chat"), "siliconflow": ("https://api.siliconflow.cn/v1", "deepseek-ai/DeepSeek-V4.1-Flash"), "openai": ("https://api.openai.com/v1", "gpt-4o-mini"), "ollama": ("http://host.docker.internal:11434/v1", "qwen2.5:7b"), "openai-compatible": (current["base_url"], current["model"])}
     if provider not in defaults:
         raise HTTPException(400, "Unsupported model provider")
     default_url, default_model = defaults[provider]
     base_url = str(payload.get("base_url") or default_url).strip().rstrip("/")
     model = str(payload.get("model") or default_model).strip()
-    key = "" if payload.get("clear_api_key") else str(payload.get("api_key") or current["api_key"]).strip()
+    fallback_key = "" if profile_id == "new" or current["provider"] != provider else current["api_key"]
+    key = "" if payload.get("clear_api_key") else str(payload.get("api_key") or fallback_key).strip()
     if not base_url.startswith(("https://", "http://")) or not model:
         raise HTTPException(400, "A valid model URL and model name are required")
     new_config = {"provider":provider,"base_url":base_url,"model":model,"api_key":key}
-    save_model_config(new_config)
-    return {"saved":True,"provider":provider,"base_url":base_url,"model":model,"has_api_key":bool(key)}
+    saved_id = save_model_config(new_config, profile_id, str(payload.get("profile_name", "")))
+    return {"saved":True,"profile_id":saved_id,"name":str(payload.get("profile_name", "")).strip(),"provider":provider,"base_url":base_url,"model":model,"has_api_key":bool(key)}
+
+
+@app.delete("/api/config/model/{profile_id}")
+def delete_model_profile(profile_id: str):
+    saved = read_model_store()
+    profiles = [item for item in saved.get("profiles", []) if isinstance(item, dict)]
+    if not profiles and profile_id == "current":
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text("{}", encoding="utf-8")
+        try:
+            CONFIG_PATH.chmod(0o600)
+        except OSError:
+            pass
+        return {"deleted": True, "active_profile_id": None, "profiles": []}
+    remaining = [item for item in profiles if item.get("id") != profile_id]
+    if len(remaining) == len(profiles):
+        raise HTTPException(404, "模型配置不存在")
+    active_id = saved.get("active_profile_id")
+    if active_id == profile_id:
+        active_id = remaining[0]["id"] if remaining else None
+    saved["profiles"] = remaining
+    saved["active_profile_id"] = active_id
+    if active_id:
+        active = next(item for item in remaining if item.get("id") == active_id)
+        saved.update({key: str(active.get(key, "")) for key in ("provider", "base_url", "model", "api_key")})
+    else:
+        saved.update({"provider": "openai-compatible", "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini", "api_key": ""})
+    CONFIG_PATH.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        CONFIG_PATH.chmod(0o600)
+    except OSError:
+        pass
+    return {"deleted": True, "active_profile_id": active_id, "profiles": [safe_model_profile(item) for item in remaining]}
 
 
 @app.post("/api/config/model/test")
-async def test_model_config():
-    cfg = model_config()
+async def test_model_config(payload: dict[str, Any] | None = None):
+    profile_id = str((payload or {}).get("profile_id") or "")
+    cfg = model_config(profile_id or None)
+    if not cfg["api_key"] and cfg["provider"] != "ollama":
+        raise HTTPException(400, "尚未保存 API Key。请先填写 API Key 并保存设置，再测试连接。")
     headers = {"Authorization": f"Bearer {cfg['api_key']}"} if cfg["api_key"] else {}
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -363,6 +460,8 @@ async def test_model_config():
             response.raise_for_status()
             return {"ok":True,"model":cfg["model"],"message":"连接成功"}
     except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
+            raise HTTPException(401, "API Key 未通过认证。请确认复制的是硅基流动 API Key，保存后再测试。")
         raise HTTPException(502, f"Model service returned HTTP {e.response.status_code}")
     except httpx.HTTPError:
         raise HTTPException(502, "无法连接到模型服务，请检查地址和网络")
@@ -510,6 +609,7 @@ async def assistant_chat(
     message: str = Form(default=""),
     image: UploadFile | None = File(default=None),
     history: str = Form(default="[]"),
+    model_id: str = Form(default="local"),
 ) -> dict[str, Any]:
     """Chat over local product documents, optionally grounded by a submitted image."""
     question = message.strip()[:3000]
@@ -539,8 +639,15 @@ async def assistant_chat(
             sources.append(source)
     sources = sources[:12]
 
-    cfg = model_config()
-    configured = bool(cfg["api_key"]) or cfg["provider"] == "ollama"
+    local_only = model_id == "local"
+    stored_profiles = [item for item in read_model_store().get("profiles", []) if isinstance(item, dict)]
+    valid_profile_ids = {str(item.get("id")) for item in stored_profiles} if stored_profiles else {"current"}
+    if not local_only and model_id not in valid_profile_ids:
+        raise HTTPException(404, "所选模型配置不存在，请刷新模型列表。")
+    cfg = model_config(None if local_only else model_id)
+    configured = not local_only and (bool(cfg["api_key"]) or cfg["provider"] == "ollama")
+    if not local_only and not configured:
+        raise HTTPException(400, "所选模型尚未保存 API Key，请到模型管理中配置后再使用。")
     model = cfg["model"]
     answer_text = ""
     if configured:

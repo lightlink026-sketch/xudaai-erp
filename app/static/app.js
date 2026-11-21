@@ -1,6 +1,7 @@
 const $ = (selector) => document.querySelector(selector);
 let chatHistory = [];
 let selectedChatImage = null;
+let modelHasSavedKey = false;
 
 function toast(message) {
   const el = document.createElement('div');
@@ -114,6 +115,7 @@ $('#chat-form').onsubmit = async (event) => {
   const form = new FormData();
   form.append('message', message);
   form.append('history', JSON.stringify(chatHistory.slice(-8)));
+  form.append('model_id', $('#chat-model-select').value || 'local');
   if (image) form.append('image', image);
 
   try {
@@ -146,7 +148,7 @@ $('#chat-message').onkeydown = (event) => {
 };
 
 const modelDefaults = {
-  siliconflow: ['https://api.siliconflow.cn/v1', 'Qwen/Qwen2.5-VL-72B-Instruct'],
+  siliconflow: ['https://api.siliconflow.cn/v1', 'deepseek-ai/DeepSeek-V4.1-Flash'],
   deepseek: ['https://api.deepseek.com/v1', 'deepseek-chat'],
   openai: ['https://api.openai.com/v1', 'gpt-4o-mini'],
   ollama: ['http://host.docker.internal:11434/v1', 'qwen2.5:7b'],
@@ -161,14 +163,89 @@ $('#model-form [name=provider]').onchange = (event) => {
 
 async function loadModelConfig() {
   try {
-    const config = await fetch('/api/config/model').then((response) => response.json());
+    const result = await fetch('/api/config/models').then((response) => response.json());
+    const select = $('#model-profile-select');
+    select.innerHTML = result.profiles.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}${item.has_api_key ? '' : '（未配置 Key）'}</option>`).join('');
+    const selectedId = result.profiles.some((item) => item.id === result.active_profile_id) ? result.active_profile_id : result.profiles[0]?.id;
+    if (!selectedId) return;
+    select.value = selectedId;
+    await loadModelProfile(selectedId);
+    await loadChatModels();
+  } catch (_) { /* The page remains usable if settings are unavailable. */ }
+}
+
+async function loadModelProfile(profileId) {
+  if (!profileId || profileId === 'new') return;
+  try {
+    const config = await fetch(`/api/config/model?profile_id=${encodeURIComponent(profileId)}`).then((response) => response.json());
+    modelHasSavedKey = config.has_api_key;
+    $('#model-form [name=profile_id]').value = config.profile_id;
+    $('#model-form [name=profile_name]').value = config.name || '';
     $('#model-form [name=provider]').value = config.provider;
     $('#model-form [name=base_url]').value = config.base_url;
     $('#model-form [name=model]').value = config.model;
     $('#model-form [name=api_key]').value = '';
     $('#model-form [name=api_key]').placeholder = config.has_api_key ? '已保存密钥；留空保持不变' : '请输入 API Key（Ollama 可留空）';
-  } catch (_) { /* The page remains usable if settings are unavailable. */ }
+    $('#model-form [name=clear_api_key]').checked = false;
+    $('#delete-model-profile').disabled = false;
+  } catch (_) { /* Keep the current form if a profile was removed elsewhere. */ }
 }
+
+$('#model-profile-select').onchange = (event) => loadModelProfile(event.target.value);
+
+$('#add-model-profile').onclick = () => {
+  const select = $('#model-profile-select');
+  if (!select.querySelector('option[value="new"]')) select.add(new Option('新模型配置（未保存）', 'new'));
+  select.value = 'new';
+  modelHasSavedKey = false;
+  $('#model-form').reset();
+  $('#model-form [name=profile_id]').value = 'new';
+  $('#model-form [name=profile_name]').value = '';
+  $('#model-form [name=api_key]').value = '';
+  $('#model-form [name=api_key]').placeholder = '请输入 API Key';
+  $('#model-form [name=clear_api_key]').checked = false;
+  $('#model-form [name=provider]').value = 'siliconflow';
+  $('#model-form [name=base_url]').value = modelDefaults.siliconflow[0];
+  $('#model-form [name=model]').value = modelDefaults.siliconflow[1];
+  $('#delete-model-profile').disabled = true;
+  $('#model-state').textContent = '';
+  $('#model-form [name=profile_name]').focus();
+};
+
+$('#delete-model-profile').onclick = async () => {
+  const profileId = $('#model-form [name=profile_id]').value;
+  if (!profileId || profileId === 'new') return;
+  if (!window.confirm('删除这条模型配置？已保存的 API Key 也会从本机配置中移除。')) return;
+  try {
+    const response = await fetch(`/api/config/model/${encodeURIComponent(profileId)}`, { method: 'DELETE' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '删除失败');
+    localStorage.removeItem('chat-model-id');
+    toast('模型配置已删除');
+    await loadModelConfig();
+    await loadStatus();
+  } catch (error) {
+    $('#model-state').textContent = error.message || '删除失败';
+  }
+};
+
+async function loadChatModels() {
+  try {
+    const result = await fetch('/api/config/models').then((response) => response.json());
+    const select = $('#chat-model-select');
+    const remembered = localStorage.getItem('chat-model-id') || '';
+    select.innerHTML = '<option value="local">仅本地检索（不调用 AI）</option>' + result.profiles.map((item) => {
+      const missingKey = !item.has_api_key && item.provider !== 'ollama';
+      return `<option value="${esc(item.id)}" ${missingKey ? 'disabled' : ''}>${esc(item.name)}${missingKey ? ' · 未配置 Key' : ''}</option>`;
+    }).join('');
+    const selected = result.profiles.find((item) => item.id === remembered && (item.has_api_key || item.provider === 'ollama'));
+    const active = result.profiles.find((item) => item.id === result.active_profile_id && (item.has_api_key || item.provider === 'ollama'));
+    select.value = selected?.id || active?.id || 'local';
+    localStorage.setItem('chat-model-id', select.value);
+  } catch (_) { /* Local search remains available if model settings cannot be loaded. */ }
+}
+
+$('#chat-model-select').onchange = (event) => localStorage.setItem('chat-model-id', event.target.value);
 
 $('#model-form').onsubmit = async (event) => {
   event.preventDefault();
@@ -181,8 +258,17 @@ $('#model-form').onsubmit = async (event) => {
     if (!response.ok) throw new Error(data.detail);
     $('#model-form [name=api_key]').value = '';
     $('#model-form [name=clear_api_key]').checked = false;
+    $('#model-form [name=profile_id]').value = data.profile_id;
+    $('#model-form [name=profile_name]').value = data.name;
+    modelHasSavedKey = data.has_api_key;
+    $('#model-form [name=api_key]').placeholder = modelHasSavedKey ? '已保存密钥；留空保持不变' : '请输入 API Key（Ollama 可留空）';
     $('#model-state').textContent = '已保存';
     toast('模型设置已保存');
+    await loadModelConfig();
+    $('#model-profile-select').value = data.profile_id;
+    await loadModelProfile(data.profile_id);
+    $('#chat-model-select').value = data.profile_id;
+    localStorage.setItem('chat-model-id', data.profile_id);
     await loadStatus();
   } catch (error) {
     $('#model-state').textContent = error.message || '保存失败';
@@ -191,9 +277,23 @@ $('#model-form').onsubmit = async (event) => {
 
 $('#test-model').onclick = async () => {
   const state = $('#model-state');
+  const provider = $('#model-form [name=provider]').value;
+  const profileId = $('#model-form [name=profile_id]').value;
+  if (profileId === 'new') {
+    state.textContent = '先保存这条模型配置，再测试连接。';
+    return;
+  }
+  if ($('#model-form [name=api_key]').value.trim()) {
+    state.textContent = '请先点“保存设置”，再测试连接。';
+    return;
+  }
+  if (!modelHasSavedKey && provider !== 'ollama') {
+    state.textContent = '尚未保存 API Key。请先填写并保存，再测试连接。';
+    return;
+  }
   state.textContent = '连接测试中…';
   try {
-    const response = await fetch('/api/config/model/test', { method: 'POST' });
+    const response = await fetch('/api/config/model/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile_id: profileId }) });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail);
     state.textContent = `${data.message} · ${data.model}`;
@@ -274,7 +374,7 @@ async function loadStatus() {
     $('#total-files').textContent = data.total_files;
     $('#error-files').textContent = data.errors;
     $('#last-indexed').textContent = data.last_indexed ? new Date(data.last_indexed).toLocaleString() : '暂无';
-    $('#chat-model-status').textContent = data.answer_enabled ? `${data.model_provider} · 已启用` : 'AI 尚未配置';
+    $('#chat-model-status').textContent = data.configured_model_count ? `${data.configured_model_count} 个模型可用` : 'AI 尚未配置';
   } catch (_) { /* Keep the static shell available while offline. */ }
 }
 
@@ -283,3 +383,4 @@ function esc(value = '') {
 }
 
 loadStatus();
+loadChatModels();
