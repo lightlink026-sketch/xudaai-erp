@@ -210,7 +210,7 @@ def save_conversation(conversation_id: str, workspace: str, messages: list[dict[
                     "incoterm": str(record.get("incoterm", ""))[:100], "origin_port": str(record.get("origin_port", ""))[:150],
                     "destination_port": str(record.get("destination_port", ""))[:150], "shipping": str(record.get("shipping", "0"))[:40],
                     "shipping_term": str(record.get("shipping_term", ""))[:100],
-                    "items": [{"name": str(item.get("name", ""))[:200], "quantity": str(item.get("quantity", ""))[:40], "unit": str(item.get("unit", ""))[:30], "unit_price": str(item.get("unit_price", ""))[:40], "amount": str(item.get("amount", ""))[:40]} for item in items[:50] if isinstance(item, dict)],
+                    "items": [{"name": str(item.get("name", ""))[:200], "description": str(item.get("description", ""))[:500], "configuration": str(item.get("configuration", ""))[:500], "colors": str(item.get("colors", ""))[:300], "size_breakdown": str(item.get("size_breakdown", ""))[:300], "moq": str(item.get("moq", ""))[:40], "quantity": str(item.get("quantity", ""))[:40], "unit": str(item.get("unit", ""))[:30], "unit_price": str(item.get("unit_price", ""))[:40], "amount": str(item.get("amount", ""))[:40], "source": str(item.get("source", ""))[:500]} for item in items[:50] if isinstance(item, dict)],
                 })
             action = message.get("proposed_action")
             if isinstance(action, dict) and action.get("type") in {"customer.save", "customer.delete", "freight_rate.save", "freight.calculate", "salesperson.save", "salesperson.delete", "order.save", "commission_rule.save", "payroll.calculate", "rule.save", "quote.draft", "pi.draft"} and isinstance(action.get("data"), dict):

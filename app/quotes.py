@@ -229,9 +229,12 @@ def search_quotes(conn: sqlite3.Connection, query: str, document_types: set[str]
             "origin_charges": data.get("origin_charges", "0"), "insurance_amount": data.get("insurance_amount", "0"),
             "insurance_term": data.get("insurance_term", ""), "destination_charges": data.get("destination_charges", "0"),
             "duties": data.get("duties", "0"), "tax_amount": data.get("tax_amount", "0"), "tax_term": data.get("tax_term", ""),
-            "items": [{"name": item.get("name", ""), "quantity": item.get("quantity", ""),
-                       "unit": item.get("unit", ""), "unit_price": item.get("unit_price", ""),
-                       "amount": item.get("amount", "")} for item in items[:50]],
+            "items": [{"name": item.get("name", ""), "description": item.get("description", ""),
+                       "configuration": item.get("configuration", ""), "colors": item.get("colors", ""),
+                       "size_breakdown": item.get("size_breakdown", ""), "moq": item.get("moq", ""),
+                       "quantity": item.get("quantity", ""), "unit": item.get("unit", ""),
+                       "unit_price": item.get("unit_price", ""), "amount": item.get("amount", ""),
+                       "source": item.get("source", "")} for item in items[:50]],
         })
         if len(result) >= max(1, min(limit, 30)):
             break
