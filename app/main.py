@@ -104,6 +104,9 @@ def init_db() -> None:
           currency TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL,
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS quote_match_cache(
+          cache_key TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
         """)
         file_columns = {row[1] for row in c.execute("PRAGMA table_info(files)")}
         if "image_embedding" not in file_columns:
@@ -723,27 +726,33 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
     if profiles and model_id not in {str(item.get("id")) for item in profiles}:
         raise HTTPException(404, "所选模型配置不存在")
     cfg = model_config(model_id)
-    if not cfg["api_key"] and cfg["provider"] != "ollama":
-        raise HTTPException(400, "所选模型尚未配置 API Key")
     selected_ids = payload.get("selected_products", [])
     if not isinstance(selected_ids, list):
         selected_ids = []
     if len(selected_ids) > 20:
         raise HTTPException(422, "一次最多选择 20 个产品；请分批生成报价单")
+    doc_type = "PI" if str(payload.get("document_type", "quote")).lower() == "pi" else "报价单"
+    requested_currency = str(payload.get("currency", "USD")).upper()
+    if requested_currency not in {"USD", "EUR", "CNY", "GBP", "JPY"}:
+        requested_currency = "USD"
+    document_language = "en" if str(payload.get("language", "zh")).lower() == "en" else "zh"
+    force_refresh = bool(payload.get("force_refresh", False))
     selected_context = []
     selected_groups: dict[str, dict[str, Any]] = {}
+    cached_items: dict[str, dict[str, Any]] = {}
+    cache_keys: dict[str, str] = {}
     with db() as c:
         for raw_id in selected_ids[:20]:
             try:
                 file_id = int(raw_id)
             except (TypeError, ValueError):
                 continue
-            file_row = c.execute("SELECT id,name,path,ext FROM files WHERE id=? AND status='ready'", (file_id,)).fetchone()
+            file_row = c.execute("SELECT id,name,path,ext,sha256,mtime FROM files WHERE id=? AND status='ready'", (file_id,)).fetchone()
             if not file_row:
                 continue
             parent = Path(file_row["path"]).parent.as_posix()
             selection_id = str(file_row["id"])
-            group = {"selection_id": selection_id, "folder": parent, "selected_path": file_row["path"], "images": [], "docs": []}
+            group = {"selection_id": selection_id, "folder": parent, "selected_path": file_row["path"], "images": [], "docs": [], "source_versions": [(file_row["path"], file_row["sha256"], file_row["mtime"]) ]}
             if file_row["ext"] in IMAGE_TYPES:
                 group["images"].append({"id": file_row["id"], "name": file_row["name"], "path": file_row["path"]})
             else:
@@ -755,16 +764,18 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
                 image_placeholders = ",".join("?" for _ in image_exts)
                 if not group["images"]:
                     image_row = c.execute(
-                        f"SELECT id,name,path FROM files WHERE status='ready' AND ext IN ({image_placeholders}) AND substr(path,1,?)=? ORDER BY name LIMIT 1",
+                        f"SELECT id,name,path,sha256,mtime FROM files WHERE status='ready' AND ext IN ({image_placeholders}) AND substr(path,1,?)=? ORDER BY name LIMIT 1",
                         (*image_exts, len(prefix), prefix),
                     ).fetchone()
                     if image_row:
                         group["images"].append({"id": image_row["id"], "name": image_row["name"], "path": image_row["path"]})
+                        group["source_versions"].append((image_row["path"], image_row["sha256"], image_row["mtime"]))
                 siblings = c.execute(
-                    f"SELECT f.id,f.name,f.path,f.ext FROM files f WHERE f.status='ready' AND f.ext NOT IN ({image_placeholders}) AND substr(f.path,1,?)=? ORDER BY CASE WHEN f.ext IN ('.txt','.md','.docx') THEN 0 WHEN f.ext='.xlsx' THEN 1 ELSE 2 END,f.name LIMIT 30",
+                    f"SELECT f.id,f.name,f.path,f.ext,f.sha256,f.mtime FROM files f WHERE f.status='ready' AND f.ext NOT IN ({image_placeholders}) AND substr(f.path,1,?)=? ORDER BY CASE WHEN f.ext IN ('.txt','.md','.docx') THEN 0 WHEN f.ext='.xlsx' THEN 1 ELSE 2 END,f.name LIMIT 30",
                     (*image_exts, len(prefix), prefix),
                 ).fetchall()
                 for sibling in siblings:
+                    group["source_versions"].append((sibling["path"], sibling["sha256"], sibling["mtime"]))
                     rows = c.execute("SELECT content,page FROM chunks WHERE file_id=? ORDER BY id LIMIT 20", (sibling["id"],)).fetchall()
                     group["docs"].extend(f"{sibling['path']}（第 {row['page'] or '未标注'} 页）：{row['content'][:1400]}" for row in rows)
                 # Supplier price books are often stored at the supplier root rather
@@ -772,11 +783,13 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
                 model_codes = list(dict.fromkeys(re.findall(r"\d{3,}", parent + "/" + file_row["name"])))
                 supplier_root = parent.split("/")[0]
                 root_prefix = supplier_root + "/"
-                pricebooks = c.execute("SELECT id,path FROM files WHERE status='ready' AND ext='.xlsx' AND substr(path,1,?)=? ORDER BY path LIMIT 20", (len(root_prefix), root_prefix)).fetchall()
+                pricebooks = c.execute("SELECT id,path,sha256,mtime FROM files WHERE status='ready' AND ext='.xlsx' AND substr(path,1,?)=? ORDER BY path LIMIT 20", (len(root_prefix), root_prefix)).fetchall()
                 for pricebook in pricebooks:
                     for code in model_codes:
                         rows = c.execute("SELECT content,page FROM chunks WHERE file_id=? AND content LIKE ? ORDER BY id LIMIT 8", (pricebook["id"], f"%{code}%")).fetchall()
                         group["docs"].extend(f"{pricebook['path']}（报价表，第 {row['page'] or '未标注'} 页）：{row['content'][:1600]}" for row in rows)
+                        if rows:
+                            group["source_versions"].append((pricebook["path"], pricebook["sha256"], pricebook["mtime"]))
             selected_groups[selection_id] = group
         for selection_id, group in selected_groups.items():
             images = "、".join(dict.fromkeys(item["name"] for item in group["images"])) or "无"
@@ -785,15 +798,28 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
             detail_lines = [line for line in excerpts if line not in price_lines]
             prioritized = detail_lines[:1] + price_lines[:1] + detail_lines[1:2]
             block = f"勾选项 ID：{selection_id}\n选择文件：{group['selected_path']}\n产品目录：{group['folder']}\n产品图片：{images}\n关联资料：\n" + ("\n".join(line[:850] for line in prioritized) or "未找到关联文字资料")
-            selected_context.append(block[:1900])
-    if not selected_context:
+            cache_identity = {
+                "selected_path": group["selected_path"], "sources": sorted(set(group["source_versions"])),
+                "provider": cfg.get("provider", ""), "base_url": cfg.get("base_url", ""), "model": cfg.get("model", ""),
+                "currency": requested_currency, "language": document_language,
+            }
+            cache_key = hashlib.sha256(json.dumps(cache_identity, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+            cache_keys[selection_id] = cache_key
+            cache_row = c.execute("SELECT data FROM quote_match_cache WHERE cache_key=?", (cache_key,)).fetchone() if not force_refresh else None
+            if cache_row:
+                try:
+                    cached_item = json.loads(cache_row["data"])
+                    if isinstance(cached_item, dict):
+                        cached_items[selection_id] = cached_item
+                except (TypeError, ValueError):
+                    pass
+            if selection_id not in cached_items:
+                selected_context.append(block[:1900])
+    if not selected_groups:
         raise HTTPException(400, "请先勾选检索结果中的产品图片或产品资料")
-    doc_type = "PI" if str(payload.get("document_type", "quote")).lower() == "pi" else "报价单"
-    requested_currency = str(payload.get("currency", "USD")).upper()
-    if requested_currency not in {"USD", "EUR", "CNY", "GBP", "JPY"}:
-        requested_currency = "USD"
-    document_language = "en" if str(payload.get("language", "zh")).lower() == "en" else "zh"
     schema = {"items":[{"selection_id":"", "name":"", "description":"", "colors":"", "size_breakdown":"", "configuration":"", "carton_spec":"", "units_per_carton":"", "carton_quantity":"", "carton_volume":"", "gross_weight":"", "net_weight":"", "quantity":"1", "moq":"0", "unit":"pairs", "unit_price":"0", "discount_percent":"0", "source":"需人工核对"}]}
+    if selected_context and not cfg["api_key"] and cfg["provider"] != "ollama":
+        raise HTTPException(400, "所选模型尚未配置 API Key")
     instruction = (
         f"根据每一个勾选项分别关联对应图片、目录里的商品详情和报价表，整理{doc_type}产品明细。必须针对每个不同的勾选项 ID 恰好输出一行；不能按目录合并，不能漏掉任何 ID。每行 selection_id 必须原样填写对应的‘勾选项 ID’。单据币种为 {requested_currency}；从明确对应的报价表/币种列提取型号、名称、描述、颜色、尺码范围、配置、MOQ、单价。禁止把相近款式的价格或尺码套用到当前产品。找不到确切匹配的单价填 0 并标需核对，不要编造。"
         "颜色字段只写颜色名称，不要在颜色字段里重复分色数量；每行对应一款，quantity 是该款唯一总数量。尺码、配置、装箱规格（长×宽×高及原始单位）、单箱装量（双/箱或件/箱）、明确箱数、单箱体积（m³）、毛重和净重只有资料里明确写出才填；体积只取资料明确值，不要自行推测。数量采用 MOQ（若未提供则为 1），单位优先按资料取值，否则鞋类用 pairs、其他用 pcs。客户、公司、付款和贸易条款不在这里提取。"
@@ -802,10 +828,13 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
     )
     headers = {"Authorization": f"Bearer {cfg['api_key']}"} if cfg["api_key"] else {}
     try:
-        async with httpx.AsyncClient(timeout=90) as client:
-            response = await client.post(f"{cfg['base_url'].rstrip('/')}/chat/completions", headers=headers, json={"model": cfg["model"], "temperature": 0, "messages":[{"role":"system","content":"你是结构化单据草稿整理器。严格遵守用户要求的 JSON 字段和不猜测原则。"},{"role":"user","content":instruction}]})
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
+        if selected_context:
+            async with httpx.AsyncClient(timeout=90) as client:
+                response = await client.post(f"{cfg['base_url'].rstrip('/')}/chat/completions", headers=headers, json={"model": cfg["model"], "temperature": 0, "messages":[{"role":"system","content":"你是结构化单据草稿整理器。严格遵守用户要求的 JSON 字段和不猜测原则。"},{"role":"user","content":instruction}]})
+                response.raise_for_status()
+                content = response.json()["choices"][0]["message"]["content"]
+        else:
+            content = '{"items":[]}'
         if isinstance(content, list):
             content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(content).strip(), flags=re.I)
@@ -813,28 +842,30 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(draft, dict) or not isinstance(draft.get("items"), list):
             raise ValueError("missing required JSON fields")
         # Map each result back to exactly one selected result, preserving one row per choice.
-        selection_ids = list(selected_groups)
+        selection_ids = [selection_id for selection_id in selected_groups if selection_id not in cached_items]
         matched_items: dict[str, dict[str, Any]] = {}
         for index, item in enumerate(draft["items"]):
             if isinstance(item, dict):
                 requested_id = str(item.get("selection_id", "")).strip()
-                selection_id = requested_id if requested_id in selected_groups else next((candidate for candidate in selection_ids if candidate not in matched_items), "")
+                selection_id = requested_id if requested_id in selection_ids else next((candidate for candidate in selection_ids if candidate not in matched_items), "")
                 if not selection_id or selection_id in matched_items:
                     continue
                 matched_items[selection_id] = item
         unique_items = []
-        for selection_id in selection_ids:
+        for selection_id in selected_groups:
             group = selected_groups[selection_id]
-            item = matched_items.get(selection_id) or {
+            item = dict(cached_items.get(selection_id) or matched_items.get(selection_id) or {
                 "name": Path(group["folder"]).name or Path(group["selected_path"]).stem or ("Unidentified product" if document_language == "en" else "待识别产品"),
                 "description": "", "colors": "", "size_breakdown": "", "configuration": "", "carton_spec": "", "units_per_carton": "", "carton_quantity": "", "carton_volume": "", "gross_weight": "", "net_weight": "", "quantity": "1", "moq": "0", "unit": "pairs", "unit_price": "0", "discount_percent": "0",
                 "source": "Product details need review" if document_language == "en" else "未自动识别，请核对",
-            }
+            })
             folder = group["folder"]
             item.pop("selection_id", None)
             if not str(item.get("name", "")).strip():
                 item["name"] = Path(folder).name or Path(group["selected_path"]).stem or (f"Product {selection_id}" if document_language == "en" else f"产品 {selection_id}")
-            if selection_id not in matched_items:
+            if selection_id in cached_items:
+                pass
+            elif selection_id not in matched_items:
                 item["source"] = item["source"] if document_language == "en" else f"{folder} · {item['source']}"
             else:
                 moq_value = str(item.get("moq") or "0").strip()
@@ -846,13 +877,19 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
                     item["source"] = model_source or "Product data"
                 else:
                     item["source"] = folder if not model_source or model_source == "需人工核对" else f"{folder} · {model_source}"
+            if selection_id not in cached_items:
+                with db() as c:
+                    c.execute(
+                        "INSERT INTO quote_match_cache(cache_key,data,updated_at) VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at",
+                        (cache_keys[selection_id], json.dumps(item, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
+                    )
             representative_image = group["images"]
             if representative_image:
                 item["image_path"] = representative_image[0]["path"]
                 item["image_file_id"] = representative_image[0]["id"]
             unique_items.append(item)
         draft["items"] = unique_items
-        return {"draft": draft}
+        return {"draft": draft, "cache": {"hits": len(cached_items), "misses": len(selected_context), "refreshed": force_refresh}}
     except httpx.HTTPStatusError as exc:
         raise HTTPException(502, f"模型整理单据失败，HTTP {exc.response.status_code}")
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):

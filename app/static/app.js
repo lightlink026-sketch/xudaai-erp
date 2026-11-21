@@ -979,11 +979,11 @@ $('#quote-save-customer').onclick = async () => {
     $('#quote-state').textContent = `客户“${data.customer.name}”已保存，可下次直接选择。`;
   } catch (error) { $('#quote-state').textContent = error.message; }
 };
-async function importSelectedQuoteProducts() {
+async function importSelectedQuoteProducts(forceRefresh = false) {
   if (!selectedQuoteProducts.size) { $('#quote-state').textContent = '请先在 AI 对话结果中勾选产品图片。'; return; }
-  const button = $('#quote-import-chat'); button.disabled = true; $('#quote-state').textContent = '正在按图片目录匹配商品详情和报价资料…';
+  const button = $('#quote-import-chat'); button.disabled = true; $('#quote-state').textContent = forceRefresh ? '正在强制重新识别所选产品…' : '正在检查匹配缓存并读取产品资料…';
   try {
-    const response = await fetch('/api/quotes/from-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document_type: $('#quote-form').elements.namedItem('document_type').value, language: $('#quote-form').elements.namedItem('language').value, currency: $('#quote-form').elements.namedItem('currency').value, model_id: $('#chat-model-select').value || 'local', selected_products: [...selectedQuoteProducts.keys()] }) });
+    const response = await fetch('/api/quotes/from-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document_type: $('#quote-form').elements.namedItem('document_type').value, language: $('#quote-form').elements.namedItem('language').value, currency: $('#quote-form').elements.namedItem('currency').value, model_id: $('#chat-model-select').value || 'local', selected_products: [...selectedQuoteProducts.keys()], force_refresh: forceRefresh }) });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || '无法整理对话内容');
     const draft = data.draft;
@@ -996,11 +996,13 @@ async function importSelectedQuoteProducts() {
     const merged = { ...current, ...draft, document_type: current.document_type, language: current.language, template_name: current.template_name, company_name: current.company_name, company_address: current.company_address, company_phone: current.company_phone, company_email: current.company_email, company_contact: current.company_contact, currency: current.currency, quote_date: current.quote_date, exchange_rate: current.exchange_rate, exchange_date: current.exchange_date, origin_port: current.origin_port, destination_port: current.destination_port, insurance_term: current.insurance_term, incoterm: current.incoterm, payment_terms: current.payment_terms, payment_note: current.payment_note, shipping_term: current.shipping_term, tax_term: current.tax_term, tax_amount: current.tax_amount, tax_note: current.tax_note, origin_charges: current.origin_charges, shipping: current.shipping, insurance_amount: current.insurance_amount, destination_charges: current.destination_charges, duties: current.duties, other_fees: current.other_fees, items: importedItems.length ? importedItems : current.items };
     fillQuoteForm(merged);
     autoImportedSelection = [...selectedQuoteProducts.keys()].sort().join(',');
-    $('#quote-state').textContent = `已匹配 ${draft.items?.length || 0} 个所选产品，每个勾选项单独一行。公司信息请填写；生成前可核对价格。`;
+    const cache = data.cache || { hits: 0, misses: draft.items?.length || 0 };
+    const cacheNote = cache.hits ? `复用缓存 ${cache.hits} 款${cache.misses ? `，仅重新匹配 ${cache.misses} 款` : '，无需再次调用 AI'}` : '已重新匹配资料';
+    $('#quote-state').textContent = `${cacheNote}。共 ${draft.items?.length || 0} 款，每个勾选项单独一行。公司信息请填写；生成前可核对价格。`;
   } catch (error) { $('#quote-state').textContent = error.message || '整理失败'; }
   finally { button.disabled = false; }
 }
-$('#quote-import-chat').onclick = () => importSelectedQuoteProducts();
+$('#quote-import-chat').onclick = () => importSelectedQuoteProducts(true);
 $('#quote-form').elements.namedItem('language').addEventListener('change', () => {
   const profile = availableCompanyProfiles.find((item) => item.id === $('#quote-company-profile').value);
   if (profile) applyCompanyProfile(profile);
