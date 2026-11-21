@@ -382,6 +382,7 @@ let activeQuoteId = null;
 let activeQuoteStatus = 'draft';
 let pendingDocumentType = 'quote';
 let quoteDefaults = {};
+let autoImportedSelection = '';
 
 async function loadQuoteTemplates() {
   const select = $('#quote-template');
@@ -409,15 +410,17 @@ $('#open-quote-dialog').onclick = async () => {
   if (!activeQuoteId) $('#quote-form').elements.namedItem('document_type').value = pendingDocumentType;
   renderSelectedQuoteProducts();
   $('#quote-dialog').showModal();
+  const signature = [...selectedQuoteProducts.keys()].sort().join(',');
+  if (!activeQuoteId && signature && signature !== autoImportedSelection) await importSelectedQuoteProducts(true);
 };
 $('#close-quote-dialog').onclick = () => $('#quote-dialog').close();
 $('#quote-dialog').onclick = (event) => { if (event.target === $('#quote-dialog')) $('#quote-dialog').close(); };
 $('#start-quote').onclick = () => {
-  pendingDocumentType = 'quote'; fillQuoteForm({ document_type: 'quote' });
+  pendingDocumentType = 'quote'; autoImportedSelection = ''; fillQuoteForm({ document_type: 'quote' });
   $('#open-quote-dialog').click();
 };
 $('#start-pi').onclick = () => {
-  pendingDocumentType = 'pi'; fillQuoteForm({ document_type: 'pi' });
+  pendingDocumentType = 'pi'; autoImportedSelection = ''; fillQuoteForm({ document_type: 'pi' });
   $('#open-quote-dialog').click();
 };
 
@@ -455,7 +458,8 @@ function quotePayload() {
   expiry.setDate(expiry.getDate() + Math.min(365, Math.max(1, Number(daysRaw) || 30)));
   return {
     document_type: value('document_type'), template_name: value('template_name'),
-    company_name: value('company_name'), company_contact: value('company_contact'),
+    company_name: value('company_name'), company_address: value('company_address'), company_phone: value('company_phone'), company_email: value('company_email'),
+    company_contact: [value('company_address'), value('company_phone'), value('company_email')].filter(Boolean).join('\n'),
     customer: value('customer'), customer_address: value('customer_address'),
     quote_date: quoteDate, valid_until: Number.isNaN(expiry.getTime()) ? '' : expiry.toISOString().slice(0,10), currency: value('currency'),
     exchange_rate: value('exchange_rate'), exchange_date: value('exchange_date'), origin_port: value('origin_port'), destination_port: value('destination_port'), insurance_term: value('insurance_term'),
@@ -487,11 +491,12 @@ function updateQuoteTotal() {
 function fillQuoteForm(data, id = null, quoteNo = '') {
   const form = $('#quote-form');
   data = { ...quoteDefaults, ...data };
+  if (!data.company_address && data.company_contact) data.company_address = data.company_contact;
   if (data.document_type === 'PI') data.document_type = 'pi';
   if (data.document_type === 'Q') data.document_type = 'quote';
   data.document_type ||= 'quote'; data.incoterm ||= 'EXW'; data.payment_terms ||= 'T/T 30% deposit, 70% before shipment'; data.insurance_term ||= 'Buyer';
   data.shipping_term ||= 'Excluded'; data.tax_term ||= 'Excluded';
-  for (const name of ['document_type','template_name','company_name','company_contact','customer','customer_address','quote_date','currency','exchange_rate','exchange_date','origin_port','destination_port','insurance_term','delivery_time','bank_details','notes','shipping','other_fees','shipping_term','tax_term','tax_amount','tax_note','payment_note']) {
+  for (const name of ['document_type','template_name','company_name','company_address','company_phone','company_email','customer','customer_address','quote_date','currency','exchange_rate','exchange_date','origin_port','destination_port','insurance_term','delivery_time','bank_details','notes','shipping','other_fees','shipping_term','tax_term','tax_amount','tax_note','payment_note']) {
     form.elements.namedItem(name).value = data[name] ?? (name === 'quote_date' ? new Date().toISOString().slice(0,10) : ['shipping','other_fees'].includes(name) ? '0' : name === 'currency' ? 'USD' : '');
   }
   for (const [selectName, customName] of [['incoterm','incoterm_custom'],['payment_terms','payment_terms_custom'],['shipping_term','shipping_term_custom'],['tax_term','tax_term_custom']]) {
@@ -614,21 +619,23 @@ $('#quote-save-customer').onclick = async () => {
     $('#quote-state').textContent = `客户“${data.customer.name}”已保存，可下次直接选择。`;
   } catch (error) { $('#quote-state').textContent = error.message; }
 };
-$('#quote-import-chat').onclick = async () => {
-  if (!chatHistory.length && !selectedQuoteProducts.size) { $('#quote-state').textContent = '请先在 AI 对话中检索并勾选产品，或说明客户和产品信息。'; return; }
-  const button = $('#quote-import-chat'); button.disabled = true; $('#quote-state').textContent = '正在读取已选产品资料…';
+async function importSelectedQuoteProducts() {
+  if (!selectedQuoteProducts.size) { $('#quote-state').textContent = '请先在 AI 对话结果中勾选产品图片。'; return; }
+  const button = $('#quote-import-chat'); button.disabled = true; $('#quote-state').textContent = '正在按图片目录匹配商品详情和报价资料…';
   try {
-    const response = await fetch('/api/quotes/from-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document_type: $('#quote-form').elements.namedItem('document_type').value, currency: $('#quote-form').elements.namedItem('currency').value, model_id: $('#chat-model-select').value || 'local', history: chatHistory, selected_products: [...selectedQuoteProducts.keys()] }) });
+    const response = await fetch('/api/quotes/from-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document_type: $('#quote-form').elements.namedItem('document_type').value, currency: $('#quote-form').elements.namedItem('currency').value, model_id: $('#chat-model-select').value || 'local', selected_products: [...selectedQuoteProducts.keys()] }) });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || '无法整理对话内容');
     const draft = data.draft;
     const current = quotePayload();
-    const merged = { ...draft, document_type: current.document_type, template_name: current.template_name, company_name: current.company_name, company_contact: current.company_contact, currency: current.currency, quote_date: current.quote_date, exchange_rate: current.exchange_rate, exchange_date: current.exchange_date, origin_port: current.origin_port, destination_port: current.destination_port, insurance_term: current.insurance_term, incoterm: current.incoterm, payment_terms: current.payment_terms, payment_note: current.payment_note, shipping_term: current.shipping_term, tax_term: current.tax_term, tax_amount: current.tax_amount, tax_note: current.tax_note, shipping: current.shipping, other_fees: current.other_fees, delivery_time: draft.delivery_time || current.delivery_time, bank_details: draft.bank_details || current.bank_details, customer: draft.customer || current.customer, customer_address: draft.customer_address || current.customer_address, valid_until: draft.valid_until || current.valid_until, items: draft.items?.length ? draft.items : current.items };
+    const merged = { ...current, ...draft, document_type: current.document_type, template_name: current.template_name, company_name: current.company_name, company_address: current.company_address, company_phone: current.company_phone, company_email: current.company_email, company_contact: current.company_contact, currency: current.currency, quote_date: current.quote_date, exchange_rate: current.exchange_rate, exchange_date: current.exchange_date, origin_port: current.origin_port, destination_port: current.destination_port, insurance_term: current.insurance_term, incoterm: current.incoterm, payment_terms: current.payment_terms, payment_note: current.payment_note, shipping_term: current.shipping_term, tax_term: current.tax_term, tax_amount: current.tax_amount, tax_note: current.tax_note, shipping: current.shipping, other_fees: current.other_fees, items: draft.items?.length ? draft.items : current.items };
     fillQuoteForm(merged);
-    $('#quote-state').textContent = '产品已导入。请核对单价、数量和规格后继续。';
+    autoImportedSelection = [...selectedQuoteProducts.keys()].sort().join(',');
+    $('#quote-state').textContent = `已自动匹配 ${draft.items?.length || 0} 个产品。公司信息请填写；生成前可核对产品数量和价格。`;
   } catch (error) { $('#quote-state').textContent = error.message || '整理失败'; }
   finally { button.disabled = false; }
-};
+}
+$('#quote-import-chat').onclick = () => importSelectedQuoteProducts(false);
 $('#quote-save').onclick = async () => {
   try { const data = await saveQuote(); $('#quote-state').textContent = `草稿已保存：${data.quote_no}`; toast('报价草稿已保存'); }
   catch (error) { $('#quote-state').textContent = error.message; }
@@ -650,7 +657,7 @@ $('#quote-pdf').onclick = async () => {
   } catch (error) { $('#quote-state').textContent = error.message || 'PDF 生成失败'; }
   finally { button.disabled = false; }
 };
-$('#quote-new').onclick = () => fillQuoteForm({});
+$('#quote-new').onclick = () => { autoImportedSelection = ''; fillQuoteForm({}); };
 $('#quote-list').onclick = async (event) => {
   const edit = event.target.closest('[data-quote-edit]');
   const download = event.target.closest('[data-quote-download]');

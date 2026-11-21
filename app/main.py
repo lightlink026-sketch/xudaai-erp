@@ -407,7 +407,7 @@ def quote_defaults_get() -> dict[str, Any]:
 
 @app.put("/api/quotes/defaults")
 async def quote_defaults_put(payload: dict[str, Any]) -> dict[str, Any]:
-    keys = {"company_name", "company_contact", "currency", "incoterm", "payment_terms", "payment_note", "shipping_term", "tax_term", "tax_note", "delivery_time", "bank_details", "template_name"}
+    keys = {"company_name", "company_contact", "company_address", "company_phone", "company_email", "currency", "incoterm", "payment_terms", "payment_note", "shipping_term", "tax_term", "tax_note", "delivery_time", "bank_details", "template_name"}
     values = {key: str(payload.get(key, "")).strip()[:1000] for key in keys}
     if values.get("currency") and not re.fullmatch(r"[A-Za-z]{3}", values["currency"]):
         raise HTTPException(422, "默认币种请使用三位代码，例如 USD")
@@ -461,15 +461,11 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
     cfg = model_config(model_id)
     if not cfg["api_key"] and cfg["provider"] != "ollama":
         raise HTTPException(400, "所选模型尚未配置 API Key")
-    history = payload.get("history", [])
-    if not isinstance(history, list):
-        raise HTTPException(422, "对话记录格式无效")
-    user_turns = [str(item.get("content", ""))[:1200] for item in history if isinstance(item, dict) and item.get("role") == "user"]
-    conversation = "\n".join(f"用户：{turn}" for turn in user_turns[-8:])[:8000]
     selected_ids = payload.get("selected_products", [])
     if not isinstance(selected_ids, list):
         selected_ids = []
     selected_context = []
+    selected_groups: dict[str, dict[str, Any]] = {}
     with db() as c:
         for raw_id in selected_ids[:20]:
             try:
@@ -479,26 +475,52 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
             file_row = c.execute("SELECT id,name,path,ext FROM files WHERE id=? AND status='ready'", (file_id,)).fetchone()
             if not file_row:
                 continue
+            parent = Path(file_row["path"]).parent.as_posix()
+            group = selected_groups.setdefault(parent, {"folder": parent, "images": [], "docs": []})
             if file_row["ext"] in IMAGE_TYPES:
-                related = related_text_for_images([{"file_id": file_id, "path": file_row["path"]}], limit=6)
-                excerpts = [f"{item['path']}: {item['snippet'][:700]}" for item in related]
+                group["images"].append(file_row["name"])
             else:
-                rows = c.execute("SELECT content,page FROM chunks WHERE file_id=? ORDER BY id LIMIT 5", (file_id,)).fetchall()
-                excerpts = [f"第 {row['page'] or '未标注'} 页: {row['content'][:700]}" for row in rows]
-            selected_context.append(f"已勾选产品资料：{file_row['path']}\n" + ("\n".join(excerpts) or "该资料没有可读取的文字内容"))
-    if not conversation.strip() and not selected_context:
-        raise HTTPException(400, "请先在 AI 对话中检索并勾选产品资料，或补充对话内容")
+                rows = c.execute("SELECT content,page FROM chunks WHERE file_id=? ORDER BY id LIMIT 12", (file_id,)).fetchall()
+                group["docs"].extend(f"{file_row['path']}（第 {row['page'] or '未标注'} 页）：{row['content'][:1200]}" for row in rows)
+            # Selecting a product image associates it with the text and spreadsheet files
+            # in that product folder. Group by folder so a photo set becomes one quote line.
+            if file_row["ext"] in IMAGE_TYPES:
+                prefix = "" if parent == "." else parent.rstrip("/") + "/"
+                image_exts = tuple(IMAGE_TYPES)
+                placeholders = ",".join("?" for _ in image_exts)
+                siblings = c.execute(
+                    f"SELECT f.id,f.name,f.path,f.ext FROM files f WHERE f.status='ready' AND f.ext NOT IN ({placeholders}) AND (?='' OR substr(f.path,1,?)=?) ORDER BY CASE WHEN f.ext IN ('.txt','.md','.docx') THEN 0 WHEN f.ext='.xlsx' THEN 1 ELSE 2 END,f.name LIMIT 30",
+                    (*image_exts, prefix, len(prefix), prefix),
+                ).fetchall()
+                for sibling in siblings:
+                    rows = c.execute("SELECT content,page FROM chunks WHERE file_id=? ORDER BY id LIMIT 20", (sibling["id"],)).fetchall()
+                    group["docs"].extend(f"{sibling['path']}（第 {row['page'] or '未标注'} 页）：{row['content'][:1400]}" for row in rows)
+                # Supplier price books are often stored at the supplier root rather
+                # than beside each product. Match their indexed rows by the model code.
+                model_codes = list(dict.fromkeys(re.findall(r"\d{3,}", Path(parent).name)))
+                if model_codes and parent not in {"", "."}:
+                    supplier_root = parent.split("/")[0]
+                    root_prefix = supplier_root + "/"
+                    pricebooks = c.execute("SELECT id,path FROM files WHERE status='ready' AND ext='.xlsx' AND substr(path,1,?)=? ORDER BY path LIMIT 20", (len(root_prefix), root_prefix)).fetchall()
+                    for pricebook in pricebooks:
+                        for code in model_codes:
+                            rows = c.execute("SELECT content,page FROM chunks WHERE file_id=? AND content LIKE ? ORDER BY id LIMIT 8", (pricebook["id"], f"%{code}%")).fetchall()
+                            group["docs"].extend(f"{pricebook['path']}（报价表，第 {row['page'] or '未标注'} 页）：{row['content'][:1600]}" for row in rows)
+        for folder, group in selected_groups.items():
+            images = "、".join(dict.fromkeys(group["images"])) or "无"
+            excerpts = list(dict.fromkeys(group["docs"]))
+            selected_context.append(f"产品目录：{folder}\n已选图片：{images}\n相关商品详情/报价资料：\n" + ("\n".join(excerpts[:32]) or "未找到关联文字资料"))
+    if not selected_context:
+        raise HTTPException(400, "请先勾选检索结果中的产品图片或产品资料")
     doc_type = "PI" if str(payload.get("document_type", "quote")).lower() == "pi" else "报价单"
     requested_currency = str(payload.get("currency", "USD")).upper()
     if requested_currency not in {"USD", "EUR", "CNY", "GBP", "JPY"}:
         requested_currency = "USD"
-    schema = {"customer":"", "customer_address":"", "quote_date":"", "valid_until":"", "currency":requested_currency, "incoterm":"", "payment_terms":"", "delivery_time":"", "bank_details":"", "notes":"", "items":[{"name":"", "description":"", "colors":"", "size_breakdown":"", "configuration":"", "quantity":"1", "moq":"0", "unit":"pcs", "unit_price":"0", "discount_percent":"0", "source":"需人工核对"}]}
+    schema = {"items":[{"folder":"", "name":"", "description":"", "colors":"", "size_breakdown":"", "configuration":"", "quantity":"1", "moq":"0", "unit":"pcs", "unit_price":"0", "discount_percent":"0", "source":"需人工核对"}]}
     instruction = (
-        f"从已勾选的产品资料和用户输入整理一份{doc_type}草稿。单据币种为 {requested_currency}；单价只取资料中该币种对应的明确价格栏，缺少该币种价格就留 0 并标需核对，禁止自行按汇率换算。产品名称、描述、型号、颜色尺码可从已勾选资料提取；价格、数量、客户地址、付款/运费或交易条款只有在资料或用户明确给出时才提取，不得推断。"
-        "缺失的单价填写 0，并在 source 标注‘需人工核对’；缺失的数量默认 1 但需用户核对；缺失的其他文字字段留空。"
-        "颜色和数量写入 colors；36-44 或其他尺码分布写入 size_breakdown；其他规格写入 configuration，不能丢弃。\n"
-        f"只返回一个符合 JSON 语法的对象，不要 Markdown。字段结构：{json.dumps(schema, ensure_ascii=False)}\n\n对话：\n{conversation}"
-        + ("\n\n用户勾选的资料摘录：\n" + "\n\n".join(selected_context[:20])[:18000] if selected_context else "")
+        f"根据勾选结果中的产品图片目录，自动关联该目录的商品详情和报价表，整理一份{doc_type}产品明细。每个不同产品目录只生成一行；同目录多张图片是同一产品，禁止重复生成。每行 folder 必须原样填入对应的‘产品目录’路径。单据币种为 {requested_currency}；从明确对应的报价表/币种列提取型号、产品名称、描述、颜色、尺码范围、配置、MOQ、单价。禁止把相近款式的价格或尺码套用到当前产品。找不到确切匹配的单价填 0，并在 source 标注‘需核对价格’；不要编造。"
+        "颜色、尺码或配置只有资料里明确写出才填。数量采用 MOQ（若未提供则为 1），单位优先按资料取值，否则鞋类用 pairs、其他用 pcs。客户、公司、付款和贸易条款不在这里提取。"
+        f"只返回合法 JSON，不要 Markdown。字段结构：{json.dumps(schema, ensure_ascii=False)}\n\n已勾选的图片和关联产品资料：\n" + "\n\n".join(selected_context)[:40000]
     )
     headers = {"Authorization": f"Bearer {cfg['api_key']}"} if cfg["api_key"] else {}
     try:
@@ -512,6 +534,29 @@ async def quote_from_chat(payload: dict[str, Any]) -> dict[str, Any]:
         draft = json.loads(cleaned)
         if not isinstance(draft, dict) or not isinstance(draft.get("items"), list):
             raise ValueError("missing required JSON fields")
+        # Keep a stable, inspectable source on each automatically associated product row.
+        folders = list(selected_groups)
+        unique_items = []
+        used_folders: set[str] = set()
+        for index, item in enumerate(draft["items"]):
+            if isinstance(item, dict):
+                requested_folder = str(item.get("folder", "")).strip()
+                folder = requested_folder if requested_folder in selected_groups else (folders[min(index, len(folders) - 1)] if folders else "已勾选产品资料")
+                if folder in used_folders:
+                    continue
+                used_folders.add(folder)
+                moq_value = str(item.get("moq") or "0").strip()
+                moq_number = float(moq_value) if re.fullmatch(r"\d+(?:\.\d+)?", moq_value) else 0
+                if not str(item.get("quantity", "")).strip() or (str(item.get("quantity", "1")).strip() == "1" and moq_number > 1):
+                    item["quantity"] = item.get("moq") or "1"
+                model_source = str(item.get("source", "")).strip()
+                item["source"] = folder if not model_source or model_source == "需人工核对" else f"{folder} · {model_source}"
+                item.pop("folder", None)
+                unique_items.append(item)
+        for folder in folders:
+            if folder not in used_folders:
+                unique_items.append({"name": Path(folder).name or "待识别产品", "description": "", "colors": "", "size_breakdown": "", "configuration": "", "quantity": "1", "moq": "0", "unit": "pairs", "unit_price": "0", "discount_percent": "0", "source": f"{folder} · 未自动识别，请核对"})
+        draft["items"] = unique_items
         return {"draft": draft}
     except httpx.HTTPStatusError as exc:
         raise HTTPException(502, f"模型整理单据失败，HTTP {exc.response.status_code}")

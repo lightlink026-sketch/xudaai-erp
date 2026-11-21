@@ -46,7 +46,7 @@
       </dialog>
       <dialog id="quote-dialog" class="model-dialog quote-dialog">
         <div class="model-dialog-head"><div><span class="eyebrow">DOCUMENT BUILDER</span><h2>报价单 / PI</h2></div><button id="close-quote-dialog" type="button" aria-label="关闭">×</button></div>
-        <p class="model-dialog-intro">选择产品资料，填写客户和条款，直接生成报价单或 PI PDF。</p>
+        <p class="model-dialog-intro">勾选产品图片后自动带入产品资料；填写公司抬头、地址和电话，再生成报价单或 PI PDF。</p>
         <div class="quote-card">
           <div class="quote-form-head"><h3 id="quote-form-title">新建单据</h3><span id="quote-number"></span></div>
           <div id="quote-selected-products" class="quote-selected-products"><span>还没有勾选产品。请先在对话结果中勾选产品图片或资料。</span></div>
@@ -59,10 +59,12 @@
               <label>模板<select name="template_name" id="quote-template"><option value="">系统默认模板</option></select></label>
               <label class="template-upload">上传 DOCX 模板<input id="quote-template-upload" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label>
               <label>公司名称<input name="company_name" placeholder="填写公司抬头"></label>
-              <label>公司联系方式<input name="company_contact" placeholder="地址、电话、邮箱"></label>
+              <label>公司地址<input name="company_address" placeholder="公司地址"></label>
+              <label>公司电话<input name="company_phone" type="tel" placeholder="公司联系电话"></label>
+              <label>公司邮箱<input name="company_email" type="email" placeholder="公司邮箱（选填）"></label>
             </div>
             <p class="template-hint">DOCX 模板可放在 data/templates（或 TEMPLATES_DIR）目录，也可在这里上传。占位符：{{customer}}、{{quote_no}}、{{items}}、{{subtotal}}、{{total}}、{{payment_terms}}、{{bank_details}}。当前会保留模板段落与表格文字，复杂样式和图片不保证原样。</p>
-            <div class="quote-items-head"><h3>已选产品（可调整颜色/尺码/数量）</h3><button id="quote-add-item" class="secondary" type="button">＋ 添加产品</button></div>
+            <div class="quote-items-head"><h3>自动匹配的产品（数量可调整）</h3><button id="quote-add-item" class="secondary" type="button">＋ 添加产品</button></div>
             <div id="quote-items"></div>
             </section>
             <section class="quote-stage" data-quote-stage="2" hidden>
@@ -103,7 +105,7 @@
             </section>
             <div class="quote-wizard-actions"><button type="button" id="quote-prev" class="secondary" hidden>上一步</button><span id="quote-stage-label">第 1 步，共 3 步</span><button type="button" id="quote-next" class="primary">下一步</button></div>
             <div id="quote-total" class="quote-total">总计：USD 0.00</div>
-            <div class="quote-actions"><span id="quote-state"></span><button type="button" class="secondary" id="quote-import-chat">导入已选产品</button><button type="button" class="secondary" id="quote-save-defaults">保存默认配置</button><button type="button" class="secondary" id="quote-save">保存草稿</button><button type="button" class="primary" id="quote-pdf">生成并下载 PDF</button><button type="button" class="secondary" id="quote-new">新建</button></div>
+            <div class="quote-actions"><span id="quote-state"></span><button type="button" class="secondary" id="quote-import-chat">重新匹配产品</button><button type="button" class="secondary" id="quote-save-defaults">保存默认配置</button><button type="button" class="secondary" id="quote-save">保存草稿</button><button type="button" class="primary" id="quote-pdf">生成并下载 PDF</button><button type="button" class="secondary" id="quote-new">新建</button></div>
           </form>
         </div>
         <div class="quote-list-card"><h3>报价 / PI 记录</h3><div id="quote-list"><p>载入中…</p></div></div>
