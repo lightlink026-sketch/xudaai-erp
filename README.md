@@ -32,6 +32,14 @@ uvicorn app.main:app --reload
 
 打开 <http://127.0.0.1:8000>。把产品资料复制到 `library/`，在“资料同步”页面点击“立即同步”，或使用网页上传。直接运行 Python 时，资料目录通过 `LIBRARY_DIR` 设置，索引和数据库目录通过 `DATA_DIR` 设置。
 
+### Windows 本机使用（不依赖 Docker）
+
+1. 在 `.env` 中将 `LIBRARY_DIR` 设置为资料目录，例如 `C:/Users/jojo/Desktop/Yupoo下载`。
+2. 首次安装依赖时运行 `python -m venv .venv`、`.\.venv\Scripts\python.exe -m pip install -r requirements.txt`，语义以图搜图再运行 `.\.venv\Scripts\python.exe -m pip install -r requirements-clip.txt`。
+3. 双击 `start-local.bat` 启动网页服务，再访问 <http://127.0.0.1:8000>。首次启动会下载 CLIP 模型并建立索引；后续新增或修改资料会自动同步。
+
+首次索引大量图片时会持续占用 CPU 和约 1–2 GB 内存，完成后保持服务运行即可每 5 分钟检查更新。关闭启动窗口会停止服务。
+
 ## Docker Compose
 
 ```powershell
