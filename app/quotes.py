@@ -86,20 +86,21 @@ def logistics_totals(items: list[dict[str, Any]]) -> dict[str, Any]:
             unit_text = str(item.get(field, "")).casefold()
             if "lb" in unit_text or "lbs" in unit_text:
                 weight_each *= Decimal("0.45359237")
-            elif "g/" in unit_text or "克/" in unit_text:
+            elif (re.search(r"(?<!k)\bg\s*/", unit_text) is not None) or "克/" in unit_text:
                 weight_each /= Decimal("1000")
             if accumulator_name == "gross":
                 gross_total += weight_each * carton_count
             else:
                 net_total += weight_each * carton_count
     count = len(items)
+    serial = lambda value: round(float(value), 6)
     return {
-        "cartons": cartons_total if count and unknown_cartons == 0 else None,
-        "volume_cbm": volume_total if count and unknown_volume == 0 else None,
-        "gross_weight_kg": gross_total if count and unknown_gross == 0 else None,
-        "net_weight_kg": net_total if count and unknown_net == 0 else None,
-        "known_cartons": cartons_total, "known_volume_cbm": volume_total,
-        "known_gross_weight_kg": gross_total, "known_net_weight_kg": net_total,
+        "cartons": serial(cartons_total) if count and unknown_cartons == 0 else None,
+        "volume_cbm": serial(volume_total) if count and unknown_volume == 0 else None,
+        "gross_weight_kg": serial(gross_total) if count and unknown_gross == 0 else None,
+        "net_weight_kg": serial(net_total) if count and unknown_net == 0 else None,
+        "known_cartons": serial(cartons_total), "known_volume_cbm": serial(volume_total),
+        "known_gross_weight_kg": serial(gross_total), "known_net_weight_kg": serial(net_total),
         "unknown_cartons": unknown_cartons, "unknown_volume": unknown_volume,
         "unknown_gross": unknown_gross, "unknown_net": unknown_net,
     }

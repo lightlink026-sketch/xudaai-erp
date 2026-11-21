@@ -29,6 +29,15 @@ function toast(message) {
   setTimeout(() => el.remove(), 3500);
 }
 
+async function readApiJson(response) {
+  const body = await response.text();
+  try { return JSON.parse(body); }
+  catch (_) {
+    const detail = body.trim().slice(0, 240);
+    throw new Error(detail || `服务器返回无效响应（HTTP ${response.status}）`);
+  }
+}
+
 document.querySelectorAll('.nav').forEach((button) => {
   button.onclick = () => {
     document.querySelectorAll('.nav,.tab-panel').forEach((item) => item.classList.remove('active'));
@@ -931,7 +940,7 @@ async function saveQuote() {
   const response = await fetch(activeQuoteId ? `/api/quotes/${activeQuoteId}` : '/api/quotes', {
     method: activeQuoteId ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
   });
-  const data = await response.json();
+  const data = await readApiJson(response);
   if (!response.ok) throw new Error(data.detail || '保存报价失败');
   activeQuoteId = data.id;
   $('#quote-number').textContent = data.quote_no;
@@ -1007,7 +1016,7 @@ $('#quote-pdf').onclick = async () => {
   try {
     const data = await saveQuote();
     const response = await fetch(`/api/quotes/${data.id}/pdf`, { method: 'POST' });
-    if (!response.ok) { const error = await response.json(); throw new Error(error.detail || 'PDF 生成失败'); }
+    if (!response.ok) { const error = await readApiJson(response); throw new Error(error.detail || 'PDF 生成失败'); }
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a'); link.href = url; link.download = `${data.quote_no}.pdf`; link.click();
