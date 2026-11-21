@@ -7,6 +7,11 @@ services:
         ENABLE_MEDIA_AI: ${ENABLE_MEDIA_AI:-0}
     container_name: xudaai-library
     env_file: .env
+    environment:
+      DATA_DIR: /srv/app/data
+      LIBRARY_DIR: /srv/app/library
+      HF_HOME: /root/.cache/huggingface
+      TORCH_HOME: /root/.cache/torch
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:

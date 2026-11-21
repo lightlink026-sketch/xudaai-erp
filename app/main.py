@@ -12,6 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import imagehash
 from docx import Document
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -51,6 +55,7 @@ _sync_task: asyncio.Task | None = None
 _clip_model: Any = None
 _clip_preprocess: Any = None
 _clip_torch: Any = None
+_clip_device: Any = None
 _dingtalk_task: asyncio.Task | None = None
 _whisper_model: Any = None
 VIDEO_TYPES = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mp3", ".wav", ".m4a", ".aac"}
@@ -107,7 +112,7 @@ def save_model_config(config: dict[str, str]) -> None:
 
 
 def visual_embedding(image: Image.Image) -> list[float]:
-    global _clip_model, _clip_preprocess, _clip_torch
+    global _clip_model, _clip_preprocess, _clip_torch, _clip_device
     if _clip_model is None:
         try:
             import open_clip
@@ -116,9 +121,11 @@ def visual_embedding(image: Image.Image) -> list[float]:
             raise RuntimeError("CLIP mode needs the optional open_clip_torch package") from e
         _clip_model, _, _clip_preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="laion2b_s34b_b79k")
         _clip_torch = torch
+        _clip_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        _clip_model = _clip_model.to(_clip_device)
         _clip_model.eval()
     with _clip_torch.no_grad():
-        tensor = _clip_preprocess(image.convert("RGB")).unsqueeze(0)
+        tensor = _clip_preprocess(image.convert("RGB")).unsqueeze(0).to(_clip_device)
         vector = _clip_model.encode_image(tensor)
         vector = vector / vector.norm(dim=-1, keepdim=True)
     return vector.cpu().float().tolist()[0]
