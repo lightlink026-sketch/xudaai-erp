@@ -18,7 +18,7 @@
         <div class="assistant-workspaces" id="assistant-workspaces" role="tablist" aria-label="AI 功能窗口">
           <button type="button" class="active" data-workspace="product">产品资料</button><button type="button" data-workspace="freight">运费与贸易</button><button type="button" data-workspace="quote">报价</button><button type="button" data-workspace="pi">PI 合同</button><button type="button" data-workspace="customer">客户</button><button type="button" data-workspace="sales">销售</button><button type="button" data-workspace="payroll">业绩与薪酬</button><button type="button" data-workspace="rules">团队规则</button>
         </div>
-        <div class="workspace-toolbar"><label>团队对话<select id="conversation-select"><option value="">新对话</option></select></label><button type="button" id="new-conversation" class="secondary">＋ 新对话</button><label class="secondary workspace-upload-button">＋ 上传到当前助手<input id="workspace-upload" type="file" multiple hidden></label><button type="button" id="manage-team-rules" class="secondary">团队规则</button></div>
+        <div class="workspace-toolbar"><label>团队对话<select id="conversation-select"><option value="">新对话</option></select></label><button type="button" id="new-conversation" class="secondary">＋ 新对话</button><button type="button" id="workspace-upload-trigger" class="secondary">＋ 上传到当前助手</button><input id="workspace-upload" type="file" multiple hidden><button type="button" id="manage-team-rules" class="secondary">团队规则</button></div>
         <p class="workspace-description" id="workspace-description">查产品、图片、规格和价格；答案附资料来源。</p>
         <div id="chat-thread" class="chat-thread" aria-live="polite">
           <div class="chat-welcome"><div class="assistant-mark">✧</div><div><b>你好，我可以帮你查产品资料</b><p>试试问“这个产品有哪些配件？”或上传图片后问“帮我找这款产品的参数”。</p></div></div>
@@ -135,5 +135,5 @@
     </section>
     <footer>资料在本机建立索引 · 原始文件不会被移动或修改</footer>
   </main>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=freight-upload-1"></script>
 </body></html>

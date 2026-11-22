@@ -49,6 +49,7 @@ document.querySelectorAll('.nav').forEach((button) => {
 });
 
 document.querySelectorAll('[data-workspace]').forEach((button) => button.onclick = () => setWorkspace(button.dataset.workspace));
+$('#workspace-upload-trigger').onclick = () => $('#workspace-upload').click();
 $('#new-conversation').onclick = () => startWorkspaceConversation();
 $('#conversation-select').onchange = async (event) => {
   if (!event.target.value) { startWorkspaceConversation(); return; }
@@ -74,6 +75,10 @@ function setWorkspace(workspace) {
   localStorage.setItem('xudaai-workspace', workspace);
   document.querySelectorAll('[data-workspace]').forEach((button) => button.classList.toggle('active', button.dataset.workspace === workspace));
   const [name, description, placeholder] = workspaceInfo[workspace];
+  const uploadTrigger = $('#workspace-upload-trigger');
+  const uploadInput = $('#workspace-upload');
+  uploadTrigger.textContent = workspace === 'freight' ? '＋ 上传运费表' : `＋ 上传到${workspace === 'product' ? '产品资料' : '当前助手'}`;
+  uploadInput.accept = workspace === 'freight' ? '.csv,.xlsx,.xlsm' : '';
   $('#workspace-description').textContent = description;
   $('#chat-message').placeholder = placeholder;
   $('#conversation-select').value = '';
